@@ -1,0 +1,9 @@
+Build a factory that launches a rocket. You control a character in Factorio through the `fac` command, and `fac` is all you have. The world may be a fresh map or a saved game already under way, and you know nothing about it yet, so look before you plan: `fac observe` shows your position, your inventory and what stands around you, `fac map` the ore, water and oil found so far, `fac research` what is researched and running, and `fac screenshot` what your screen shows, as a picture you can open with your file-reading tool.
+
+Use the factorio-rocket skill. Read its SKILL.md before your first move, and open its references when a phase needs them. In a saved game, find the phase the factory has reached, check that what stands there runs by itself, and carry on from there.
+
+The game runs in real time and never pauses, also while you think. Play the way a careful player does: plan the base before you build it, build so that belts, inserters and pipes do all the carrying, look at what you built, and keep watching the factory while you build the next part. Every `fac` answer carries a `hud` with the game clock, your free inventory slots, the research bar and warnings. When it warns, or when research or a production line stops, find the cause and fix it before you build anything else. A factory that needs you to carry things stops whenever you are busy, so do not leave one behind you.
+
+Keep a `notes.md` file in your working directory with the map, your base plan, what you built where, what is still fed by hand and what to do next, and read it again whenever you are unsure where you are.
+
+Keep playing until the rocket reaches space, about 19 s after `fac launch` is accepted. Don't stop to report progress or ask questions before then, since nobody will answer. If you are told the rocket has not launched yet, it has not: read your notes, check the factory, and carry on. If a command is rejected, read why, fix it and carry on.

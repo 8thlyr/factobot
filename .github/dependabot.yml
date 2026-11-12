@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # The label is kept for a loop switch-on: it is what starts the review loop on each Dependabot
+  # PR. The loop does not serve factobot today (JC, 2026-11-11), so it changes nothing now; the
+  # ruleset requires only the CI check.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "needs-review"
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # Workflows pin actions to major tags (actions/checkout@v7), so only major bumps ever change a
+    # pin. Don't ignore semver-major here or this entry never opens a PR.
+    labels:
+      - "needs-review"

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# List the factobot worlds running on this machine: each `fac daemon` with
+# the worktree its binary came from, its age, the CPU its server, clients and
+# Xvfb use, and whether whatever started it is gone (an orphan).
+#
+#   scripts/worlds                  # table, plus the load average
+#   scripts/worlds --kill-orphans   # SIGTERM orphaned daemons (they save and stop
+#                                   # their server and clients)
+#
+# Check it before starting worlds on a shared machine.
+set -euo pipefail
+
+kill_orphans=false
+if [[ "${1:-}" == "--kill-orphans" ]]; then
+  kill_orphans=true
+elif [[ $# -gt 0 ]]; then
+  echo "usage: $0 [--kill-orphans]" >&2
+  exit 2
+fi
+
+read -r load1 load5 _ < /proc/loadavg
+echo "load $load1 (5 min $load5) on $(nproc --all) threads"
+
+orphans=()
+found=false
+while read -r pid ppid etimes args; do
+  read -r binary subcommand _ <<<"$args"
+  [[ ${binary##*/} == fac && $subcommand == daemon ]] || continue
+  # The executable's real path: argv[0] may be relative (`mise run dev` runs
+  # target/debug/fac) or a bare `fac` from PATH. Another user's process hides
+  # its exe, so fall back to argv[0].
+  exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || exe=$binary
+  exe=${exe% (deleted)}
+  found=true
+  # CPU of the daemon and everything under it, as ps reports it (lifetime
+  # average per process, so a long-lived busy client shows its real cost).
+  # A daemon between servers (snapshot, reload) or exiting has no children,
+  # and ps then exits 1.
+  tree=$(ps -o pid= --ppid "$pid" | tr -d ' ' | paste -sd, -) || true
+  cpu=$(ps -o pcpu= -p "$pid${tree:+,$tree}" | awk '{s += $1} END {printf "%.0f", s}') || true
+  parent=$(ps -o comm= -p "$ppid" 2>/dev/null || echo gone)
+  status=running
+  if [[ $ppid == 1 || $parent == systemd || $parent == gone ]]; then
+    status=ORPHAN
+    orphans+=("$pid")
+  fi
+  run_dir=$(sed -n 's/.*--run-dir \([^ ]*\).*/\1/p' <<<"$args")
+  worktree=${exe%/target/*}
+  printf '%-7s pid %-8s cpu %4s%%  age %6s  %s  %s\n' \
+    "$status" "$pid" "$cpu" "$((etimes / 60))m" "${run_dir:-?}" "$worktree"
+done < <(ps -eo pid=,ppid=,etimes=,args=)
+
+$found || echo "no worlds running"
+if $kill_orphans && ((${#orphans[@]})); then
+  # An orphan may have exited since the listing, or belong to another user.
+  kill -TERM "${orphans[@]}" || true
+  echo "sent SIGTERM to ${#orphans[@]} orphaned daemon(s): ${orphans[*]}"
+fi

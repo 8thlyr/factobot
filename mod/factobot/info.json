@@ -1,0 +1,10 @@
+{
+  "name": "factobot",
+  "version": "0.5.0",
+  "title": "factobot",
+  "author": "Jonathan Costin",
+  "homepage": "https://github.com/8thlyr/factobot",
+  "description": "Game bridge for the factobot AI agent benchmark. Exposes a JSON command interface over RCON.",
+  "factorio_version": "2.1",
+  "dependencies": ["base >= 2.1.24"]
+}

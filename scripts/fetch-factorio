@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Download, verify and extract the pinned Factorio build into
+# ${XDG_CACHE_HOME:-~/.cache}/factobot/factorio/<version>[-client].
+#
+#   scripts/fetch-factorio            # free headless server (no account needed)
+#   scripts/fetch-factorio --client   # graphical client; needs FACTORIO_USERNAME
+#                                     # and FACTORIO_TOKEN in .env.local
+#
+# Versions and checksums are pinned in mise.toml. Safe to re-run: an existing
+# extraction is left alone.
+set -euo pipefail
+
+: "${FACTORIO_VERSION:?run through mise (mise run fetch-factorio) so mise.toml pins are loaded}"
+
+# Escape a value for a double-quoted curl config parameter. Inside quotes,
+# curl treats \\ \" \t \n \r and \v as escapes and ignores a backslash before
+# any other character, so every backslash has to be doubled.
+curl_config_escape() {
+  local s="$1" i c out=
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      \\) out+="\\\\" ;;
+      \") out+='\"' ;;
+      $'\t') out+='\t' ;;
+      $'\n') out+='\n' ;;
+      $'\r') out+='\r' ;;
+      $'\v') out+='\v' ;;
+      *) out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+build=headless
+if [[ "${1:-}" == "--client" ]]; then
+  build=alpha
+elif [[ $# -gt 0 ]]; then
+  echo "usage: $0 [--client]" >&2
+  exit 2
+fi
+
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/factobot/factorio"
+if [[ $build == headless ]]; then
+  dest="$cache/$FACTORIO_VERSION"
+  archive="factorio-headless_linux_$FACTORIO_VERSION.tar.xz"
+  sha256="${FACTORIO_HEADLESS_SHA256:?missing in mise.toml}"
+else
+  dest="$cache/$FACTORIO_VERSION-client"
+  archive="factorio_linux_$FACTORIO_VERSION.tar.xz"
+  sha256="${FACTORIO_CLIENT_SHA256:?missing in mise.toml}"
+  if [[ -z "${FACTORIO_USERNAME:-}" || -z "${FACTORIO_TOKEN:-}" ]]; then
+    cat >&2 <<'EOF'
+The graphical client download needs FACTORIO_USERNAME and FACTORIO_TOKEN in .env.local.
+FACTORIO_TOKEN is the service token (not the mod portal API key). Get it from
+"service-token" in ~/.factorio/player-data.json after logging in to the game once,
+or from https://auth.factorio.com/api-login (see https://wiki.factorio.com/Web_authentication_API).
+EOF
+    exit 1
+  fi
+fi
+
+if [[ -x "$dest/bin/x64/factorio" ]]; then
+  echo "$dest already present"
+  exit 0
+fi
+
+mkdir -p "$cache"
+tmp="$(mktemp -d "$cache/.fetch.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+
+echo "downloading $archive"
+if [[ $build == headless ]]; then
+  curl --fail --location --silent --show-error --retry 3 \
+    --output "$tmp/$archive" \
+    "https://www.factorio.com/get-download/$FACTORIO_VERSION/$build/linux64"
+else
+  # The username and token used to be part of curl's argv, which ps shows to
+  # every user on a shared host. They now travel in a mode 0600 config file.
+  # It lives under $tmp, so the EXIT trap removes it, and it is deleted as
+  # soon as curl returns.
+  cfg="$(mktemp "$tmp/curl.XXXXXX")"
+  download_url="https://www.factorio.com/get-download/$FACTORIO_VERSION/$build/linux64"
+  printf 'url = "%s?username=%s&token=%s"\n' \
+    "$(curl_config_escape "$download_url")" \
+    "$(curl_config_escape "$FACTORIO_USERNAME")" \
+    "$(curl_config_escape "$FACTORIO_TOKEN")" >"$cfg"
+  chmod 0600 "$cfg"
+  mode="$(stat -c %a "$cfg")"
+  if [[ "$mode" != "600" ]]; then
+    echo "refusing to store the Factorio account token: curl config mode is $mode" >&2
+    exit 1
+  fi
+  # Drop the account variables before starting curl, so its environment does
+  # not carry them. -q has to be first so a ~/.curlrc cannot trace this URL.
+  download_status=0
+  (
+    unset FACTORIO_USERNAME FACTORIO_TOKEN
+    curl -q --fail --location --silent --show-error --retry 3 \
+      --output "$tmp/$archive" \
+      --config "$cfg"
+  ) || download_status=$?
+  rm -f "$cfg"
+  if [[ "$download_status" -ne 0 ]]; then
+    exit "$download_status"
+  fi
+fi
+echo "$sha256  $tmp/$archive" | sha256sum --check --quiet
+tar -xJf "$tmp/$archive" -C "$tmp"
+mv "$tmp/factorio" "$dest"
+echo "installed $("$dest/bin/x64/factorio" --version | head -1) at $dest"

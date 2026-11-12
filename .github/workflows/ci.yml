@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# pytest lists its slowest tests and any skips. mise.toml stays as it is.
+env:
+  PYTEST_ADDOPTS: --durations=25 -ra
+
+jobs:
+  check:
+    name: Lint and test
+    # The self-hosted factobot runner when the repository variable
+    # FACTOBOT_RUNNER is `self-hosted` (set only on the maintainer's private
+    # development repo), for a push to main and for a pull request whose head
+    # is in that repo. Everywhere else, including this public repo, the job
+    # runs on a GitHub-hosted runner. A fork is always routed to a hosted
+    # runner and this required check fails there: a job skipped with `if`
+    # counts as a success, and fork code must not run on the self-hosted runner.
+    # `pull_request` runs this file from the merge commit, so a fork that
+    # edits it can still name the factobot labels. Blocking that is a
+    # repository setting (fork workflows need approval), not a change here.
+    # https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks
+    # https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target
+    runs-on: >-
+      ${{
+        (vars.FACTOBOT_RUNNER == 'self-hosted'
+        && !(github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.full_name != github.repository))
+        && fromJSON('["self-hosted", "linux", "x64", "factobot"]')
+        || 'ubuntu-26.04'
+      }}
+    timeout-minutes: 30
+    steps:
+      - name: Refuse a pull request from a fork
+        if: >-
+          github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::This pull request comes from a fork. Fork code does not run on the self-hosted runner. A maintainer will push the branch to 8thlyr/factobot."
+          exit 1
+      - name: Install sandbox tools
+        if: runner.environment == 'github-hosted'
+        # Ubuntu installs nft in /usr/sbin; the sandbox calls /usr/bin/nft.
+        run: |
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bubblewrap slirp4netns nftables
+          [ -e /usr/bin/nft ] || sudo ln -s /usr/sbin/nft /usr/bin/nft
+      - name: Allow bubblewrap user namespaces
+        # Same as the hosted job below. Never on the self-hosted runner.
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if [ -f /etc/apparmor.d/bwrap-userns-restrict ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          bwrap --ro-bind / / --unshare-all --die-with-parent -- /bin/true
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - uses: Swatinem/rust-cache@v2
+      - run: uv sync --project python --locked
+      - run: mise run lint
+      - run: mise run test
+
+  hosted:
+    name: Lint and unit tests
+    # Fork pull requests only. Same-repo runs keep the self-hosted steps above.
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install sandbox tools
+        # Ubuntu installs nft in /usr/sbin; the sandbox calls /usr/bin/nft.
+        run: |
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bubblewrap slirp4netns nftables
+          [ -e /usr/bin/nft ] || sudo ln -s /usr/sbin/nft /usr/bin/nft
+      - name: Allow bubblewrap user namespaces
+        # Hosted images block unprivileged user namespaces, which stops
+        # bwrap. Ubuntu 26.04 also loads an AppArmor profile that the sysctl
+        # alone does not lift. This runner is thrown away after the job.
+        # Never apply either change on the self-hosted runner.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if [ -f /etc/apparmor.d/bwrap-userns-restrict ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          bwrap --ro-bind / / --unshare-all --die-with-parent -- /bin/true
+      - uses: jdx/mise-action@v5
+      - uses: Swatinem/rust-cache@v2
+      - run: uv sync --project python --locked
+      - run: mise run lint
+      - run: mise run test

@@ -1,0 +1,38 @@
+# How the maintainer's PR review loop (switched off for now) treats pull requests here. The loop reads
+# this file from a pull request's base branch, never from its head, so a pull request cannot change its own
+# review. The "main: CI and review loop green" ruleset requires its review-gate status and the CI check. Once
+# auto-merge is turned on for a pull request, GitHub merges it when both pass.
+
+# A pull request is reviewed when it carries this label, when auto-merge is on for it (see [auto_merge]), or
+# when JC asks for a review by name.
+trigger_labels = ["needs-review"]
+# The loop never pushes to main.
+review_only_branches = ["main"]
+
+[setup]
+# docs/development.md#setup, in a fresh worktree of the pull request head.
+commands = ["mise trust", "mise install"]
+
+[fix]
+verify = "Run `mise run check` (format, lint and unit tests) and follow AGENTS.md's Verifying game behavior section: observe the game, never infer its state from your own code."
+
+[backlog]
+# Backlog pull requests merge once the loop passes their head and every check is green, like the rest.
+merge = true
+
+[auto_merge]
+# A pull request with GitHub auto-merge on is carried like a labelled one: every new head (a push, a merge of
+# main, a CI or conflict fix) gets its own review without anyone re-adding the label.
+enabled = true
+
+[conflict_fix]
+# When such a pull request conflicts with main, the loop merges main in and resolves the conflict instead of
+# reviewing a head that can't merge.
+enabled = true
+
+[retry]
+# A run that fails for a tool reason (GitHub or the model unavailable) leaves review-gate pending and runs again:
+# up to 2 more runs on the same head, 3 in all. After the last, the poller sets review-gate to failure ("runs
+# ended without a verdict"), removes needs-review and reports it, so the PR waits until someone pushes again or
+# adds needs-review back.
+tool_failures = 2

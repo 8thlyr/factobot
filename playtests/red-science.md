@@ -1,0 +1,3 @@
+Starting from nothing, get labs researching with automation science packs (red science) made by an assembling machine. Packs you craft by hand don't count: the run ends once labs have used more automation-science-pack than you have ever crafted by hand. You cannot see that total. A lab that is `working` may still be using packs you crafted by hand, so keep the assemblers feeding the labs.
+
+You are scored on game time, and the game keeps running while you think. Keep playing until you are stopped: don't stop to report progress or ask questions, since nobody will answer. If you are told that labs have not yet researched with a machine-made automation-science-pack, that total has not been reached, so carry on from the factory as it stands.

@@ -1,0 +1,42 @@
+# License and advisory policy for a public MIT OR Apache-2.0 release.
+# cargo-deny 0.20.2, run in CI by EmbarkStudios/cargo-deny-action v2.1.1.
+# Config reference: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+
+[licenses]
+# License files must match the canonical text closely.
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "MIT",
+    # unicode-ident is `(MIT OR Apache-2.0) AND Unicode-3.0`, so the
+    # Unicode license has to be allowed as well as MIT or Apache-2.0.
+    "Unicode-3.0",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+skip = [
+    { crate = "syn@2.0.119", reason = "tracing-attributes 0.1.31 still depends on syn 2. clap_derive, serde_derive, thiserror-impl and tokio-macros depend on syn 3." },
+]

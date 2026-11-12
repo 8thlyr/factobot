@@ -1,0 +1,94 @@
+[tools]
+rust = { version = "1.99.1", components = "rustfmt,clippy" }
+uv = "0.13.6"
+stylua = "2.6.0"
+lua-language-server = "3.19.2"
+node = "22.23.4"
+# FMTK, the standard Factorio mod toolkit (justarandomgeek/vscode-factoriomod-debug).
+# Few npm downloads because most users install it as a VS Code extension.
+"npm:factoriomod-debug" = { version = "2.1.9", allow_low_downloads = true }
+
+[env]
+_.file = { path = ".env.local", redact = true }
+FACTORIO_VERSION = "2.1.24"
+FACTORIO_HEADLESS_SHA256 = "c49b66cff90aceff87b30f2973af0df7f51712cb2ee3153e0169d9bed46a964f"
+FACTORIO_CLIENT_SHA256 = "8a2ed610d1fb6c0f424edce727621dd00598f65cc6d2008ee7b7513deb025611"
+
+[tasks.fetch-factorio]
+description = "Download and verify the pinned Factorio headless server into ~/.cache/factobot"
+run = "scripts/fetch-factorio"
+
+[tasks.fmt]
+description = "Format Rust, Python and Lua"
+run = [
+  "cargo fmt --all",
+  "uv run --project python ruff format python",
+  "stylua mod",
+]
+
+[tasks.luals-types]
+description = "Generate lua-language-server types for the pinned Factorio API (FMTK)"
+sources = ["mise.toml"]
+outputs = ["target/factorio-luals/factorio/config.json"]
+run = "fmtk luals-addon --online $FACTORIO_VERSION target/factorio-luals"
+
+[tasks.lint]
+description = "Check formatting, lints and types for Rust, Python and Lua"
+depends = ["luals-types"]
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  "uv run --project python ruff format --check python",
+  "uv run --project python ruff check python",
+  "uv run --project python basedpyright --project python",
+  "stylua --check mod",
+  "lua-language-server --check mod --checklevel=Warning --configpath=../.luarc.json --logpath=target/luals",
+]
+
+[tasks.test]
+description = "Unit tests (no game needed)"
+run = [
+  "cargo test --workspace --locked",
+  "cargo build --locked",
+  "uv run --project python pytest python",
+]
+
+[tasks.dev]
+description = "Persistent dev world with a viewer window on this display and a camera; SEED=n picks the map. On a Hyprland desktop, outside a terminal on that desktop, set DISPLAY=:0 and the session's WAYLAND_DISPLAY, or the viewer cannot attach"
+run = "cargo build && target/debug/fac daemon --viewer --camera --seed ${SEED:-1}"
+
+[tasks.serve]
+description = "Persistent world with a camera whose game port listens on this host's tailnet address, for `mise run watch` elsewhere; SEED=n picks the map"
+run = "cargo build && target/debug/fac daemon --camera --listen $(tailscale ip -4) --seed ${SEED:-1}"
+
+[tasks.watch]
+description = "Watch a world in a window on this display: HOST=<address>:<port> mise run watch (HOST is required). A playtest or rocket run prints the address on its `watch with:` line. On a Hyprland desktop set DISPLAY=:0 and the session's WAYLAND_DISPLAY"
+run = "cargo build && target/debug/fac watch ${HOST:?set HOST=<address>:<port>, the address a run prints on its watch with: line}"
+
+[tasks.playtest]
+description = "Run an agent (Claude Code, omp or any command) against a fresh world, sandboxed with only fac: mise run playtest -- playtests/smoke.md [--agent omp]"
+run = "cargo build --locked && FACTOBOT_FAC=$PWD/target/debug/fac uv run --project python python -m factobot.playtest"
+
+[tasks.playtest-red]
+description = "An agent from a fresh map to automated red science, watchable from another host (prints the HOST:PORT for `mise run watch`); HARNESS=, MODEL= and SEED= pick the harness, model and map (not AGENT=, which agent shells set to 1)"
+run = "cargo build --locked && FACTOBOT_FAC=$PWD/target/debug/fac uv run --project python python -m factobot.playtest playtests/red-science.md --agent ${HARNESS:-claude} --model ${MODEL:-$([ ${HARNESS:-claude} = omp ] && echo claude-opus-5-5 || echo opus)} --seed ${SEED:-1} --until automation-science-pack --timeout 36000 --listen $(tailscale ip -4)"
+
+[tasks.rocket]
+description = "Rocket run (decision 77): an agent with the factorio-rocket skill and a camera (so it has `fac screenshot`) from a fresh map, or SAVE=<save.zip>, to a rocket launch; resumed when it quits early, autosaved every 10 min, watchable from another host; HARNESS=, MODEL=, SEED= and TIMEOUT= (seconds, default 172800) pick the harness, model, map and time cap (not AGENT=, which agent shells set to 1). The skill and prompt know nothing about any seed. TIMEOUT=0 ends the run at once and is not unlimited; a huge value such as 999999999 leaves the cap unreachable. SAVE=target/playtests/<run>/world/write-data/saves/autosave-<n>.zip resumes from an autosave, and NOTES=target/playtests/<run>/notes.md hands the new agent the notes the earlier one kept (decision 85)"
+run = "cargo build --locked && FACTOBOT_FAC=$PWD/target/debug/fac uv run --project python python -m factobot.playtest playtests/rocket.md --agent ${HARNESS:-omp} --model ${MODEL:-claude-opus-5-5} --seed ${SEED:-1} ${SAVE:+--save \"$SAVE\"} ${NOTES:+--notes \"$NOTES\"} --skill skills/factorio-rocket --camera --until rocket --timeout ${TIMEOUT:-172800} --max-resumes 100 --autosave-minutes 10 --listen $(tailscale ip -4)"
+
+[tasks.agent-view]
+description = "Follow a playtest agent's messages, fac commands and results live: mise run agent-view [-- RUN_DIR]"
+run = "uv run --project python python -m factobot.agentview"
+
+[tasks.report]
+description = "Leaderboard from playtest summary.json files and Inspect eval logs: markdown and HTML with per-model scores and charts. Paths follow -- (default target/playtests); -o DIR picks the output (default target/reports)"
+run = "uv run --project python python -m factobot.report"
+
+[tasks.worlds]
+description = "List running factobot worlds with their CPU use and load; --kill-orphans stops abandoned ones"
+run = "scripts/worlds"
+
+[tasks.check]
+description = "Everything CI runs"
+depends = ["lint", "test"]

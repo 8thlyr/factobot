@@ -1,0 +1,5 @@
+You are taking over a game already in progress. Earlier you got a lab researching with a red science pack an assembling machine made, but much of the factory may still run by hand. Look around first: `fac observe`, `fac map` and `fac research` show what is built, what you carry and what is researched.
+
+Your task: get as far up the tech tree as you can. Automate red science properly, with inserters and belts feeding assemblers and labs, then move on to logistic science packs (green) and keep researching. Progress means reaching the science tiers on the way to a rocket, in this order: red (automation), green (logistic), then blue (chemical), then purple (production) and yellow (utility). A tier counts once labs research with packs of it that machines made. Military science is not on that path and does not count, so don't spend time on it. Build things that keep working without you.
+
+The game keeps running while you think. Keep playing until you are stopped: don't stop to report progress or ask questions, since nobody will answer.
