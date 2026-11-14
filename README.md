@@ -1,10 +1,20 @@
 # factobot
 
-factobot is a benchmark harness built on [Factorio](https://www.factorio.com/). An agent plays a real headless game through the `fac` command line, with the same limits a player has: it walks, mines, crafts, and builds in game time, inside reach, and it only sees the map it has explored. The game keeps running while the model thinks. A score is the game time until a milestone the harness reads from the game.
+[![CI](https://github.com/8thlyr/factobot/actions/workflows/ci.yml/badge.svg)](https://github.com/8thlyr/factobot/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
+A benchmark harness that runs an AI agent in a real, headless Factorio game and scores it on game time to a milestone.
+
+- **Rust daemon.** It supervises the Factorio server, talks to it over RCON, and serves a versioned JSON-lines protocol on two Unix sockets: one for the agent, one for the harness ([spec](docs/protocol.md)).
+- **Sandboxed agent.** The agent reaches the game only through the `fac` CLI, run inside bubblewrap with its own PID and network namespaces, all capabilities dropped and the host's networks unreachable. It can't see the harness, the repo or the host.
+- **Real game, player limits.** A Lua mod holds the agent to what a player can do: walking time, reach, the explored map. The game keeps running while the model thinks.
+- **Scored like a speedrun.** The harness reads milestones from the game in ticks and scores them against human reference times ([how](docs/human-baselines.md)).
+
+## Quickstart
 
 The game is Factorio 2.1, base game only, peaceful, with no enemy bases. The version and its checksum are pinned in `mise.toml`. factobot downloads the headless server at setup and does not redistribute the game. Text-only runs need no Factorio account.
 
-[Quickstart](docs/quickstart.md): install the tools and compile `fac` once, then run the smoke benchmark. That run finishes in under 5 minutes. The download and the first compile take longer.
+The [quickstart](docs/quickstart.md) walks through it: install the tools and compile `fac` once, then run the smoke benchmark. That run finishes in under 5 minutes. The download and the first compile take longer.
 
 ```bash
 mise run playtest -- playtests/smoke.md --timeout 180 -- \
@@ -101,8 +111,6 @@ Red science, the first ladder stage, is a fresh map until labs research with an 
 - [`docs/protocol.md`](docs/protocol.md): the socket protocol.
 - [`docs/decisions.md`](docs/decisions.md): design record, including how a stage is scored.
 - [`docs/development.md`](docs/development.md): contributor setup, tests, and the live game.
-
-The Inspect AI tasks (`inspect eval factobot/red_science`) are shelved, not removed (decision 46): their code and tests stay, and the [quickstart](docs/quickstart.md#red-science) has the command. The MCP server and the synthetic top-down render in `docs/decisions.md` (decisions 4, 7 and 11) are not built yet.
 
 ## License
 
