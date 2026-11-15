@@ -67,9 +67,9 @@ A transport belt carries 15 items/s, 7.5 on each lane. One ore lane feeds 24 sto
 | Science block, AM2: red 0.3/s, green 0.5/s (science.md) | 3.4 (plan 5.1 with the mall) | 1.1 |
 | plus blue at 0.25/s | 6.4 (8.1 with the mall) | 3.0 |
 | plus purple at 0.25/s | 19.5 | 7.8 |
-| plus yellow at 0.25/s | 28 | 20 |
+| plus yellow at 0.25/s, with processing units and LDS at 18 a minute for the rocket (processing-units.md) | 31 | 27 |
 
-So one iron column (7.5 plates/s) only just carries red, green and blue, and not with the mall filling: add iron smelting before blue. One copper trunk carries the factory through blue. Purple and yellow need more than a trunk holds: give them their own smelting and their own pair of trunks beside the first (a second copy of the same shape), or run them at half the rate. Decide before you build purple, and check the patch amounts.
+So one iron column (7.5 plates/s) only just carries red, green and blue, and not with the mall filling: add iron smelting before blue. One copper trunk carries the factory through blue. Purple and yellow need more than a trunk holds: give them their own smelting and their own trunks beside the first (a second copy of the same shape). Copper goes from one column to two before purple and to five before the processing unit block, two of them joined for it (processing-units.md, "Feeding it"). Build them while blue and purple run, before the blocks that use them, and check the patch amounts.
 
 Upstream takes first. A machine near the smelters gets its plates before one far downstream, so when supply is short the far end starves: its belt `fill` is near 0 while the upstream end is full. The fix is more smelting or a second trunk, never a detour. When everything is `working` and the trunk is packed to its end, supply is ahead: build the next consumer.
 

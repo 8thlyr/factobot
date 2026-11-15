@@ -38,8 +38,8 @@ pub struct Request {
 /// `ok` is true with `result` set, or false with `error` set. An answer to
 /// an agent method that reached the game also has `hud`, what a player's
 /// screen always shows: `time` (the game clock, h:mm:ss), `free_slots` in
-/// the inventory, `research` (`"logistics 43%"` or `"none"`) and, when there
-/// are any, `warnings`.
+/// the inventory, `research` (`"logistics 43%, 6 min left"` or `"none"`) and,
+/// when there are any, `warnings`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub v: u32,

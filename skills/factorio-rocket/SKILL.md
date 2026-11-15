@@ -36,7 +36,7 @@ Keep `notes.md` in your working directory and rewrite it after every build. Your
 
 Run it every 10 minutes of game time (the HUD's `time`), after any HUD warning, when you come back from anywhere more than a minute's walk away, and before you queue a long technology. It is five commands and it goes into your notes with the time.
 
-1. `fac research`: the progress against your last note. No movement is a stall, and so is slow movement: if a lab shows `missing_science_packs` in `fac observe --problems` at the labs, the pack it lacks is short, so run the stall protocol on that pack before you build anything else or wait.
+1. `fac research`: `current.minutes_left` against your last note. No movement is a stall, and so is slow movement. `short_of` names the pack the waiting labs (`labs_waiting`) lack; some labs always wait, since the 16 labs are sized above the pack lines, so judge by time. If that pack's line has stopped, run the stall protocol on it before you build anything else or wait. If the line runs from end to end and the HUD time plus `minutes_left` still lands past the phase's By (Phases), the line is too small: build its next block now (references/production.md, "Planned factory sizes").
 2. `fac stats` with every pack you make and its key inputs (for example `fac stats automation-science-pack logistic-science-pack chemical-science-pack plastic-bar sulfur engine-unit iron-plate copper-plate steel-plate`): `made_1m` against `made_10m`. Zero, or a drop by half, is a stall, even while research still runs on buffered packs. A plate's `made_10m` below your last note while its trunk is not backed up means drills ran out of ore: move them now (references/base-plan.md, "When a patch runs out").
 3. `fac inspect` on a pole: `power.capacity_kw` against `demand_kw`, and against your last note. Capacity that fell means a boiler lost its fuel.
 4. At each block, `fac observe --problems`, then `fac screenshot --zoom 0.5` and look.
@@ -46,7 +46,7 @@ Before you leave the base for a far site (oil, a new patch), run the check, fix 
 
 ## The stall protocol
 
-1. Find the last machine of the line that stopped: the pack assembler, or the lab. `fac inspect` it. On an assembler, `missing` names the ingredient it is short of. A lab has no `missing`, only the status `missing_science_packs`: the pack it is short of is the one in `cost.packs` of `fac research TECH --show` (TECH from the HUD's `research`) that its `lab_input` does not hold.
+1. Find the last machine of the line that stopped: the pack assembler, or the lab. `fac inspect` it. On an assembler, `missing` names the ingredient it is short of. A lab has no `missing`: `fac research` names the pack labs wait for in `short_of`.
 2. Walk that one ingredient back, machine by machine: the inserter that should deliver it (`picks_from`, `drops_into`, `status`), the belt lane it should ride (`fac observe` shows each lane), the machine that should make it, and so on, until you reach the first thing that is wrong: no power, no fuel, a lane full of another item, an empty input, a full output, a wrong recipe, a pipe on the wrong port, a mined-out drill.
 3. Fix that one thing where it is. Do not add a second line beside a broken one, and do not hand-feed around it.
 4. Stay until the stalled machine shows `working` and its product moves, then note what it was.
@@ -67,22 +67,24 @@ The picture shows that something is wrong and roughly where; `fac observe` and `
 
 Work through these in order. Each ends on checks you can see; don't start the next on an assumption. "Queue" is the research batch from references/research.md.
 
-| # | Phase | Exit check | Queue |
-|---|---|---|---|
-| 1 | **Survey and plan**: `fac map`, a walk to the iron patch, screenshots; choose the base site and write the plan (references/base-plan.md) | `notes.md` has the map and the base plan | |
-| 2 | **Burner start**: rocks for coal and stone, burner drill and furnace pairs on iron and copper, coal drills into chests (references/opening.md) | `steam-power` and `electronics` researched; each drill `working` | |
-| 3 | **Power, first lab, red by machine**: the start of the power block (references/power.md, references/layouts.md "First power"), pole line to the base, lab 1, 10 hand-made red packs, then red cell 1 at its final place (references/science.md) | the lab keeps `working` after the hand-made packs are gone | Q1 |
-| 4 | **Electric mining and smelting on belts**: ore rows onto belts, furnace columns with a coal lane, plate trunks into the base, the coal belt to the boilers, burner pairs picked up (references/smelting.md, references/power.md) | plates arrive at the base on the trunks; nothing in the factory takes coal from your hands; `HAND` is empty | |
-| 5 | **Red and green on the trunks**: the science block: red cells, green strip, 16-lab chain, the mall downstream (references/science.md) | red and green both `made_1m` at the size you planned; 8 or more labs; you craft buildings from the mall's chests | Q2, then Q3 |
-| 6 | **Steel**: a steel column on the trunk | `steel-axe` researched; steel on a belt or in a buffer chest an inserter fills | |
-| 7 | **Oil**: pumpjacks, refineries, plastic and sulfur onto a belt to the base (references/oil.md, references/endgame.md) | `oil-processing` researched; plastic and sulfur `made_1m` above 0 and arriving at the base on the belt | Q4 |
-| 8 | **Blue**: engines, advanced circuits, blue assemblers, packs by belt to lab one | blue in the labs' `lab_input`; `fac stats chemical-science-pack` steady over 10 minutes | Q5, then Q6 |
-| 9 | **Purple**: electric furnaces, productivity modules, rails, purple assemblers, sized from references/production.md | purple in the labs; 3 or more purple assemblers `working` | Q7, then Q8 |
-| 10 | **Yellow**: advanced oil with cracking (references/oil.md), lubricant, acid, batteries, processing units, robot frames, low density structures, yellow assemblers | yellow in the labs; 3 or more yellow assemblers `working` | Q9 |
-| 11 | **Rocket inputs**, built while `rocket-silo` researches: 4 productivity module 3, lines for processing units, low density structures and rocket fuel into chests beside the silo site, the silo's own ingredients, 1 raw fish | the three stockpiles grow in `fac stats`; chests hold or are filling toward 1,000 steel and 1,000 concrete | |
-| 12 | **Silo and launch** | `fac inspect` on the silo shows `rocket_ready` and the fish as payload; `fac launch` accepted | |
+| # | Phase | Exit check | Queue | By |
+|---|---|---|---|---|
+| 1 | **Survey and plan**: `fac map`, a walk to the iron patch, screenshots; choose the base site and write the plan (references/base-plan.md) | `notes.md` has the map and the base plan | | 0:05 |
+| 2 | **Burner start**: rocks for coal and stone, burner drill and furnace pairs on iron and copper, coal drills into chests (references/opening.md) | `steam-power` and `electronics` researched; each drill `working` | | 0:12 |
+| 3 | **Power, first lab, red by machine**: the start of the power block (references/power.md, references/layouts.md "First power"), pole line to the base, lab 1, 10 hand-made red packs, then red cell 1 at its final place (references/science.md) | the lab keeps `working` after the hand-made packs are gone | Q1 | 0:20 |
+| 4 | **Electric mining and smelting on belts**: ore rows onto belts, furnace columns with a coal lane, plate trunks into the base, the coal belt to the boilers, burner pairs picked up (references/smelting.md, references/power.md) | plates arrive at the base on the trunks; nothing in the factory takes coal from your hands; `HAND` is empty | | 0:40 |
+| 5 | **Red and green on the trunks**: the science block: red cells, green strip, 16-lab chain, the mall downstream (references/science.md) | red and green both `made_1m` at the size you planned; 8 or more labs; you craft buildings from the mall's chests | Q2, then Q3 | 0:50 |
+| 6 | **Steel**: a steel column on the trunk | `steel-axe` researched; steel on a belt or in a buffer chest an inserter fills | | 1:00 |
+| 7 | **Oil**: pumpjacks, refineries, plastic and sulfur onto a belt to the base (references/oil.md, references/endgame.md) | `oil-processing` researched; plastic and sulfur `made_1m` above 0 and arriving at the base on the belt | Q4 | 1:25 |
+| 8 | **Blue**: engines, advanced circuits, blue assemblers, packs by belt to lab one | blue in the labs' `lab_input`; `fac stats chemical-science-pack` steady over 10 minutes | Q5, then Q6 | 2:00 |
+| 9 | **Purple**: electric furnaces, productivity modules, rails, purple assemblers, sized from references/production.md | purple in the labs; `fac stats production-science-pack` `made_10m` 15 or more | Q7, then Q8 | 3:15 |
+| 10 | **Yellow**: advanced oil with cracking (references/oil.md), lubricant, acid, batteries, the processing unit block and the LDS row (references/processing-units.md, started as soon as `processing-unit` is researched), robot frames, yellow assemblers | yellow in the labs; `fac stats` `made_10m` 15 or more for `utility-science-pack`, `processing-unit` and `low-density-structure` | Q9 | 4:30 |
+| 11 | **Rocket inputs**, built while `rocket-silo` researches: 4 productivity module 3, lines for processing units, low density structures and rocket fuel into chests beside the silo site, the silo's own ingredients, 1 raw fish | `rocket-silo` researched; the chests hold 720 each of processing units, low density structures and rocket fuel, and 1,000 steel and 1,000 concrete | | 6:05 |
+| 12 | **Silo and launch** | `fac inspect` on the silo shows `rocket_ready` and the fish as payload; `fac launch` accepted | | 6:20 |
 
-Build ahead of research: start each phase's build while the previous batch still runs. Before every phase, make sure the phase before it passes its exit check and the factory check.
+Build ahead of research: start each phase's build while the previous batch still runs. Before every phase, make sure the phase before it passes its exit check and the factory check. The one exception is phase 10's processing unit block: it takes the longest to build and to fill, so it starts during phase 9.
+
+By is the game time (the HUD's `time`) at which the phase should pass its exit check for a launch near 6:20, which leaves margin under 7 hours: a test run's times up to `utility-science-pack` (3:44), then the measured blocks of references/processing-units.md. When the time passes a phase's By and its check still fails, you are behind, and waiting makes it worse: find the short line (`fac research` `short_of`, `fac stats` `made_10m` against the exit check) and build its next capacity now, the next smelting column or the next block. In both test runs the agent spent hours in `wait` and `sleep` while `rocket-silo` crept at a quarter of its speed.
 
 ## fac habits
 
@@ -117,6 +119,7 @@ Build ahead of research: start each phase's build while the previous batch still
 - [references/smelting.md](references/smelting.md): a 24-furnace column, ore and coal on one belt, 7.5 plates/s onto a trunk; steel and bricks.
 - [references/science.md](references/science.md): red, green, 16 labs and the mall between the two plate trunks; the entry for blue, purple and yellow.
 - [references/oil.md](references/oil.md): fluid ports, the basic and advanced oil site, long pipe-to-ground lines, the battery block.
+- [references/processing-units.md](references/processing-units.md): the processing unit block and the LDS row, 18 a minute each, and the copper and plastic they need; read it when you queue `processing-unit` (Q6), since that copper and oil come first.
 - [references/belts.md](references/belts.md): belt lanes, which lane inserters and drills fill, sideloading and the curve trap, undergrounds and splitters.
 - [references/production.md](references/production.md): machine stats, recipes, ratios per pack, factory sizes per stage, oil and power numbers.
 - [references/research.md](references/research.md): trigger technologies, the queue in batches, what to skip, how many labs.
