@@ -196,7 +196,10 @@ def test_preset_with_a_skill_is_resumed_until_the_rocket_launches(
             assert run["bash_timeouts"] == ["660000", "660000"]
             assert run["omp_config"] is None
         else:
-            assert run["omp_config"] == "bash:\n  autoBackground:\n    enabled: false\n"
+            assert run["omp_config"] == (
+                "bash:\n  autoBackground:\n    enabled: false\n"
+                "compaction:\n  thresholdTokens: 750000\n"
+            )
     assert "--resume" not in first["argv"]
     resumed = second["argv"]
     assert resumed[resumed.index("--resume") + 1] == f"{preset}-session"

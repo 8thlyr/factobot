@@ -207,7 +207,11 @@ BASH_TIMEOUT_MS = "660000"
 # omp moves a bash call that runs past 60 s to a background job and returns at
 # once, so the agent would go on before a long `fac ... --wait` ends. Its own
 # per-call timeout (300 s unless the model asks for more) is not a setting.
-OMP_CONFIG = "bash:\n  autoBackground:\n    enabled: false\n"
+# It also compacts the agent's context at 750,000 tokens, where by default the
+# 11/14 rocket run reached 857k first (decision 92).
+OMP_CONFIG = (
+    "bash:\n  autoBackground:\n    enabled: false\ncompaction:\n  thresholdTokens: 750000\n"
+)
 
 
 @dataclass
@@ -1290,7 +1294,7 @@ def main(argv: list[str] | None = None) -> int:
         "  python -m factobot.playtest playtests/smoke.md --env MY_API_KEY \\\n"
         "      -- my-agent --print {prompt}\n"
         "  python -m factobot.playtest playtests/red-science.md --model opus \\\n"
-        "      --until automation-science-pack --timeout 36000 --listen $(tailscale ip -4)\n"
+        "      --until automation-science-pack --timeout 36000 --listen ADDRESS\n"
         "  python -m factobot.playtest playtests/keep-going.md --model opus \\\n"
         "      --save target/playtests/red-science-20261102-230056/world/save.zip --timeout 36000\n"
         "  python -m factobot.playtest playtests/rocket.md --agent omp --model opus \\\n"

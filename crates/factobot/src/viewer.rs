@@ -658,7 +658,7 @@ fn client_command(
     let binary = client_dir.join("bin/x64/factorio");
     if !binary.is_file() {
         bail!(
-            "no graphical Factorio at {}; run `mise run fetch-factorio -- --client` (needs FACTORIO_TOKEN)",
+            "no graphical Factorio at {}; run `mise run fetch-factorio -- --client` (needs FACTORIO_USERNAME and FACTORIO_TOKEN)",
             binary.display()
         );
     }
