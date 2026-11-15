@@ -401,6 +401,9 @@ local function describe(job)
     view.position = job.position
     view.distance_walked = round(job.walked)
     view.stopped_short = job.stopped_short
+    if job.warnings and #job.warnings > 0 then
+      view.warnings = job.warnings
+    end
   end
   return view
 end
@@ -1524,11 +1527,13 @@ end
 -- of it, where both lanes go onto the `lane` on that side. Sideloading an
 -- underground belt passes only the lane over the half of its tile that is
 -- belt; the lane over the tunnel half is `blocked_lane` (probed on 2.1.24).
-local function belt_link(entity)
+-- `target` is the belt it points into, by default its first output; a
+-- splitter has two, so one feeding a belt names that belt.
+local function belt_link(entity, target)
   if entity.type == "underground-belt" and entity.belt_to_ground_type ~= "output" then
     return nil
   end
-  local target = entity.belt_neighbours.outputs[1]
+  target = target or entity.belt_neighbours.outputs[1]
   if not target or not LANED[target.type] then
     return nil
   end
@@ -1565,8 +1570,9 @@ end
 -- player at `here` sees it. Each way stops at the first belt farther than
 -- OBSERVE_MAX_RADIUS from there, the most `inspect` and `observe` see
 -- (decision 36).
-local BELT_WALK_MAX = 200
 local function lane_belts(belt, here)
+  -- Scoped here: the chunk is at Lua's limit of 200 locals.
+  local BELT_WALK_MAX = 200
   local found, seen = { belt }, { [belt.unit_number] = true }
   local function walk(from, downstream)
     for _ = 1, BELT_WALK_MAX do
@@ -2349,6 +2355,60 @@ local function with_belt_link(view, entity)
   return view
 end
 
+-- Warnings, added to `warnings`, for each belt that points into the side of
+-- a belt just placed and sideloads onto it (decision 91), as a player sees
+-- from the arrows where the two meet. A belt placed behind a transport belt
+-- that a belt beside it had turned into a curve straightens it, and that
+-- belt then sideloads, so the belts it continues into are looked at too.
+-- With `own`, the placed belt's own sideload is one as well: a line's job
+-- shows no `sideloads`. `seen` holds the unit numbers of the belts already
+-- warned of, so each is named once.
+local function sideload_warnings(placed, warnings, seen, own)
+  local links = {}
+  if own then
+    links[1] = { placed, belt_link(placed) }
+  end
+  local fed = { placed }
+  for _, ahead in ipairs(placed.belt_neighbours.outputs) do
+    if ahead.type == "transport-belt" and ahead.direction == placed.direction then
+      fed[#fed + 1] = ahead
+    end
+  end
+  for _, belt in ipairs(fed) do
+    for _, feeder in ipairs(belt.belt_neighbours.inputs) do
+      if LANED[feeder.type] then
+        links[#links + 1] = { feeder, belt_link(feeder, belt) }
+      end
+    end
+  end
+  for _, link in ipairs(links) do
+    local feeder, onto = link[1], link[2] and link[2].sideloads
+    if onto and not seen[feeder.unit_number] then
+      seen[feeder.unit_number] = true
+      local lanes = string.format("both its lanes go onto that belt's %s lane", onto.lane)
+      if onto.blocked_lane then
+        lanes = string.format(
+          "its %s lane goes onto that belt's %s lane, and the tunnel half blocks its %s lane",
+          other_lane(onto.blocked_lane),
+          onto.lane,
+          onto.blocked_lane
+        )
+      end
+      local at = point(feeder.position)
+      warnings[#warnings + 1] = string.format(
+        "the %s at %s, %s points into the side of the %s at %s, %s: %s",
+        feeder.name,
+        at.x,
+        at.y,
+        onto.name,
+        onto.position.x,
+        onto.position.y,
+        lanes
+      )
+    end
+  end
+end
+
 -- Why a drill's or inserter's output would share a belt lane with other
 -- items, where what it drops is known before it runs: a drill over two
 -- resources drops both, and a lane that already carries something else,
@@ -2434,8 +2494,12 @@ local function place(params)
   end
   -- What a player sees at once from the arrows of the building's ghost: an
   -- output that lands on the ground or has nowhere to go, an inserter with
-  -- nothing to take from, items that would share a belt lane with others.
+  -- nothing to take from, items that would share a belt lane with others, a
+  -- belt end pointing into the side of a belt.
   local warnings = { mixed_lane_warning(entity, view, character) }
+  if LANED[entity.type] then
+    sideload_warnings(entity, warnings, {})
+  end
   if view.drops_at then
     local blocker = drop_blocker(entity)
     if blocker then
@@ -2512,6 +2576,12 @@ local function build_along(character, job)
       job.already_there = job.already_there + 1
     else
       job.placed = job.placed + 1
+      -- A belt the line lays says what sideloads onto it, and the line's
+      -- end what it sideloads onto, in the job's `warnings`.
+      if LANED[entity.type] then
+        job.warnings, job.warned = job.warnings or {}, job.warned or {}
+        sideload_warnings(entity, job.warnings, job.warned, true)
+      end
     end
     job.next_index = job.next_index + 1
   end

@@ -212,11 +212,14 @@ pub enum Command {
     /// on a belt lane that already carries something else, or it has
     /// nothing to take from. A belt says what it does to the belt it points
     /// into: `continues` it end on, `sideloads` onto one `lane` of it, or
-    /// `curves` it (see below). Placed on a slower building of the same
-    /// kind and size (assembling-machine-2 on an assembling-machine-1, a
-    /// steel furnace on a stone furnace, a faster belt on a belt), it takes
-    /// its place and keeps its recipe and contents; the old one comes back
-    /// to your inventory and the result names it in `replaced`.
+    /// `curves` it (see below). `warnings` also names each belt end that
+    /// points into the side of the new belt, or of the belt it continues
+    /// into, and sideloads onto it, with the lane that belt's items land
+    /// on. Placed on a slower building of the same kind and size
+    /// (assembling-machine-2 on an assembling-machine-1, a steel furnace on
+    /// a stone furnace, a faster belt on a belt), it takes its place and
+    /// keeps its recipe and contents; the old one comes back to your
+    /// inventory and the result names it in `replaced`.
     ///
     /// A pipe-to-ground comes up on the side --direction names and runs
     /// underground the other way, to a partner at most 10 tiles away that
@@ -234,6 +237,9 @@ pub enum Command {
     /// far from it you stand. The job fails where it stops, saying why (out
     /// of items, something in the way, the walk ending out of build reach of
     /// the next one) with how many it placed and where the next one goes.
+    /// For belts, the job's `warnings` names each belt end that sideloads
+    /// onto a belt it laid, and a sideload of its own last belt onto a belt
+    /// already there.
     #[command(
         after_help = "Examples:\n  fac place stone-furnace 3,4\n  fac place burner-mining-drill -70,-6 --direction south\n  fac place transport-belt 5.5,0.5 --direction east\n  fac place underground-belt 6.5,0.5 --direction east                     # entrance\n  fac place underground-belt 10.5,0.5 --direction east --belt-type output # exit\n  fac place transport-belt 0.5,0.5 --to 30.5,0.5 --wait   # 31 belts moving east\n  fac place pipe 2.5,-3.5 --to 2.5,-20.5                   # a job; follow it with fac job\n  fac place small-electric-pole 0.5,2.5 --to 40.5,2.5 --spacing 7\n\nUnderground belts: give the entrance and the exit the same --direction, the\nway items travel (both east above, for items moving east), and put the exit\nfurther along that way with at most 4 tiles between them (underground-belt;\nfast and express go further). The result shows `underground` (input or\noutput) and, once the pair joins, `paired_with`: the other end. Don't rotate\nan end to make an exit: rotating turns it into the other kind facing the\nopposite way, which doesn't join the entrance.\n\nBelts, lanes and inserters: a belt has two lanes, `left` and `right` facing\nthe way items travel. Each lane holds 4 items a tile and a transport-belt\nmoves 7.5 items/s on each. Items on a lane move in single file: one that no\nmachine along the belt takes stops at its end, and the lane stops behind it\nuntil the item is taken off. So put one item on each lane, and two on one\nlane only on purpose.\n- An inserter drops onto the far lane of a belt crossing in front of it,\n  and onto the right lane of a belt running toward or away from it. It\n  takes from the near lane first (the left lane of a belt running toward\n  or away from it), then the other lane.\n- A mining drill drops onto the near lane of a belt crossing in front of\n  it, and onto the right lane of a belt running toward or away from it,\n  except that a burner drill drops onto the left lane of one running toward\n  it.\n- On a curve an inserter drops onto the lane farther from it, and a drill\n  beside the curve's outer side onto the outer lane.\n- A belt pointing into the side of another sideloads: both its lanes go onto\n  the near lane of the other belt. But when nothing feeds that tile from\n  behind, the tile turns into a curve instead (`curves`) and both lanes carry\n  on round it: add a belt behind that tile, or point the side belt at a tile\n  that has one.\n- Sideloading an underground belt's entrance or exit lets through only the\n  lane over the half of its tile that is belt (`blocked_lane` is the other):\n  a way to take one lane off a belt.\n- A belt pointing into another's back (`continues`) and a splitter keep each\n  lane on its side.\n`drops_into.lane` and `picks_from.lane` say which lane; `fac inspect` and\n`fac observe` show what is on each.\n\nA line's job shows `placed`, `already_there`, `tiles` (how many the line\nhas) and `next` (where the next one goes) as it runs. Starting a line stops a\nrunning walk or mine, and a new walk, mine or line stops it."
     )]
