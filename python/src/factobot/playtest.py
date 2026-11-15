@@ -42,7 +42,7 @@ from typing import IO, Any
 from factobot import sandbox
 from factobot.client import PROTOCOL_VERSION, FactobotError
 from factobot.harness import World, find_agent_fac, start_world
-from factobot.timelapse import Capture
+from factobot.timelapse import LAUNCH_DISARM_LUA, Capture
 
 PREAMBLE = """\
 You are playing Factorio through the `fac` command-line tool. The game is
@@ -689,6 +689,10 @@ def _run(
                 else None
             )
             frames = Capture(world.dev, out_dir, timelapse) if timelapse else None
+            if frames is not None:
+                frames.arm_launch()
+            elif save is not None:
+                world.lua(LAUNCH_DISARM_LUA)
             command = harness.command
             # --timeout limits the agent's own run, so world boot and setup don't count.
             deadline = time.monotonic() + timeout
@@ -778,6 +782,11 @@ def _run(
                 # Also when the loop raised, as a stop during a resumed agent's
                 # sandbox start does: the agents before it made calls.
                 agent_calls = [call for call in world.calls() if call["surface"] == "agent"]
+            # The camera is still writing the launch clip when the run reaches the
+            # launch: keep the world up until it is done, for at most LAUNCH_WAIT
+            # (decision 95). The milestones read below keep their launch tick.
+            if frames is not None and not stopped:
+                frames.finish_launch(stop=lambda: _stop_within(stop, 0.0))
             try:
                 milestones = progress.poll()
             except (OSError, FactobotError):
