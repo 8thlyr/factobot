@@ -9,7 +9,7 @@ Before you choose, write into `notes.md`:
 - from `fac map`: every patch of iron, copper, coal and stone with its center, nearest tile, bounding box and amount; every body of water; crude oil once you have seen it (it is often 200 tiles or more away, so one long `fac walk` in a direction `fac map` shows nothing in is a normal part of the survey, done once power and red science run). `fac map iron-ore` adds the nearest patch's shape, row by row;
 - from a walk and `fac screenshot --zoom 0.5`: where the ground between the patches is open, and where trees, rocks, cliffs or water are in the way.
 
-Amounts matter. The run uses about 250k iron ore, 190k copper ore, 100k coal and 20k stone. A patch much smaller than that will run out, and your plan has to say where the next one's belt comes in.
+Amounts matter. The run uses about 350k iron ore, 190k copper ore, 100k coal and 20k stone. A patch much smaller than that will run out, and your plan has to say where the next one's belt comes in.
 
 ## The site
 
@@ -65,11 +65,11 @@ A transport belt carries 15 items/s, 7.5 on each lane. One ore lane feeds 24 sto
 | Stage running | Iron plates/s | Copper plates/s |
 |---|---|---|
 | Science block, AM2: red 0.3/s, green 0.5/s (science.md) | 3.4 (plan 5.1 with the mall) | 1.1 |
-| plus blue at 0.25/s | 5.3 | 2.6 |
-| plus purple at 0.25/s | 18 | 7.4 |
-| plus yellow at 0.25/s | 27 | 20 |
+| plus blue at 0.25/s | 6.4 (8.1 with the mall) | 3.0 |
+| plus purple at 0.25/s | 19.5 | 7.8 |
+| plus yellow at 0.25/s | 28 | 20 |
 
-So one iron trunk and one copper trunk carry the factory through blue. Purple and yellow need more than a trunk holds: give them their own smelting and their own pair of trunks beside the first (a second copy of the same shape), or run them at half the rate. Decide before you build purple, and check the patch amounts.
+So one iron column (7.5 plates/s) only just carries red, green and blue, and not with the mall filling: add iron smelting before blue. One copper trunk carries the factory through blue. Purple and yellow need more than a trunk holds: give them their own smelting and their own pair of trunks beside the first (a second copy of the same shape), or run them at half the rate. Decide before you build purple, and check the patch amounts.
 
 Upstream takes first. A machine near the smelters gets its plates before one far downstream, so when supply is short the far end starves: its belt `fill` is near 0 while the upstream end is full. The fix is more smelting or a second trunk, never a detour. When everything is `working` and the trunk is packed to its end, supply is ahead: build the next consumer.
 

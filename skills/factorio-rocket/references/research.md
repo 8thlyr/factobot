@@ -66,7 +66,7 @@ Required total: 44 technologies, 224,425 lab-seconds at lab speed 1. Packs: red 
 
 ## Skip
 
-Military of every kind, gun turret, stone wall, heavy armor, car, construction and logistic robotics, worker robot speed, beacons, circuit network, research speed 3 and above, assembler 3. Peaceful mode and fac's lack of blueprints, ghosts and driving make them worthless here. Accumulators, solar panels and radars are silo prerequisites to research, never to build.
+Military of every kind, gun turret, stone wall, heavy armor, car, construction and logistic robotics, worker robot speed, beacons, circuit network, research speed 3 and above. Peaceful mode and fac's lack of blueprints, ghosts and driving make them worthless here. Skip `automation-3` and speed modules in machines too: an assembling machine 3 (speed 1.25) is crafted from two assembling machine 2 (1.5 between them) and 4 speed modules, and a speed module costs 5 advanced circuits for 20% more speed on one machine, so place more assembling machine 2 and keep advanced circuits for blue, purple and processing units. The speed module technologies are silo prerequisites to research, not items to make. Accumulators, solar panels and radars are silo prerequisites to research, never to build.
 
 ## How many labs
 

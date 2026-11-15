@@ -118,7 +118,7 @@ Delivery, not mining, limits every stage. In a test run the first hour placed 68
 - Boiler at full load burns 0.45 coal/s; one stack lasts 111 s. Boilers get their coal from a belt through burner inserters (power.md), never from your hands past the first lab.
 - The whole run burns about 58k coal in boilers and 20k in furnaces.
 - Coal per minute: a stone or steel furnace 1.35, a burner drill 2.25, a boiler up to 27. An electric drill on coal makes 30, enough for 22 stone furnaces; boilers need 1.5 coal drills each (3 per 2, power.md), and 80 stone furnaces 4 electric coal drills more.
-- Load: an electric drill draws 90 kW, an AM1 75 kW, an AM2 150 kW, a lab 60 kW, an inserter about 13 kW. 70 electric drills alone are 6.3 MW, three and a half boilers. Add boilers and engines before the load gets there; a brown-out slows every machine at once.
+- Load: an electric drill draws 90 kW, an AM1 75 kW, an AM2 150 kW, a lab 60 kW, an inserter about 13 kW. 70 electric drills alone are 6.3 MW, three and a half boilers. Add boilers and engines before the load gets there; a brown-out slows every machine at once. An assembling machine 3 draws 375 kW. Each module raises its machine's draw: speed 1/2/3 by 50/60/70%, productivity 1/2/3 by 40/60/80%.
 - Solar is never worth building: about 44 placements per MW against about 2 for steam.
 
 ## Rocket
