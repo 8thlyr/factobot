@@ -42,6 +42,7 @@ from typing import IO, Any
 from factobot import sandbox
 from factobot.client import PROTOCOL_VERSION, FactobotError
 from factobot.harness import World, find_agent_fac, start_world
+from factobot.timelapse import Capture
 
 PREAMBLE = """\
 You are playing Factorio through the `fac` command-line tool. The game is
@@ -500,13 +501,15 @@ def run_playtest(
     notes: str | None = None,
     max_resumes: int = DEFAULT_MAX_RESUMES,
     autosave_minutes: float | None = None,
+    timelapse: float | None = None,
     stop: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Run one agent against a world. `command`, if given, replaces the `agent` preset.
 
     With `until`, an agent that quits before the milestone is resumed up to
     `max_resumes` times. `autosave_minutes` saves the world that often (wall
-    time) while the agent plays. Setting `stop` (from a signal handler) ends
+    time) while the agent plays, and `timelapse` renders the factory every that
+    many seconds of game time (needs `camera`). Setting `stop` (from a signal handler) ends
     the run as the timeout does, with no resume after it. `notes` starts the
     agent with that text as `notes.md` in its working directory; the file it
     leaves there is copied to the run directory at every autosave and when
@@ -576,6 +579,7 @@ def run_playtest(
             save=save,
             max_resumes=max_resumes,
             autosave_minutes=autosave_minutes,
+            timelapse=timelapse,
             stop=stop,
             skills=skills,
         )
@@ -606,6 +610,7 @@ def _run(
     save: Path | None,
     max_resumes: int,
     autosave_minutes: float | None,
+    timelapse: float | None,
     stop: threading.Event | None,
     skills: Sequence[Path] = (),
 ) -> dict[str, Any]:
@@ -625,6 +630,7 @@ def _run(
     progress: _Progress | None = None
     milestones: dict[str, Any] | None = None
     autosaver: _Autosaver | None = None
+    frames: Capture | None = None
     reached: int | None = None
     exit_code: int | None = None
     # Set once a signal (`stop`) ends the run; no agent starts or resumes after it.
@@ -678,6 +684,7 @@ def _run(
                 if autosave_minutes
                 else None
             )
+            frames = Capture(world.dev, out_dir, timelapse) if timelapse else None
             command = harness.command
             # --timeout limits the agent's own run, so world boot and setup don't count.
             deadline = time.monotonic() + timeout
@@ -703,6 +710,7 @@ def _run(
                             deadline,
                             until,
                             autosaver,
+                            frames,
                             stop,
                             progress,
                         )
@@ -810,6 +818,7 @@ def _run(
             "timeout": timeout,
             "max_resumes": max_resumes,
             "autosave_minutes": autosave_minutes,
+            "timelapse": timelapse,
             "camera": camera,
             "listen": listen,
         },
@@ -860,6 +869,7 @@ def _supervise(
     deadline: float,
     until: str | None,
     autosaver: _Autosaver | None,
+    frames: Capture | None,
     stop: threading.Event | None,
     progress: _Progress,
 ) -> tuple[int | None, int | None]:
@@ -893,6 +903,8 @@ def _supervise(
                     return None, None
                 if autosaver is not None:
                     autosaver.poll()
+                if frames is not None:
+                    frames.poll()
                 milestones = _poll_milestones(progress, stop)
                 if milestones is None:
                     # The daemon got the stop signal first and is saving.
@@ -1393,6 +1405,14 @@ def main(argv: list[str] | None = None) -> int:
         f"world/write-data/saves/autosave-1.zip ... autosave-{AUTOSAVE_SLOTS}.zip in the "
         "run directory, in turn [default: off]",
     )
+    parser.add_argument(
+        "--timelapse",
+        type=float,
+        metavar="SECONDS",
+        help="with --camera, render the whole factory every SECONDS of game time to "
+        "timelapse/frame-NNNNNN.png in the run directory, for `python -m factobot.timelapse "
+        "render` [default: off]",
+    )
     args = parser.parse_args(argv)
     if (args.env or args.expose) and not command:
         parser.error("--env and --expose only apply to a custom command after --")
@@ -1405,6 +1425,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--max-resumes must be 0 or more")
     if args.autosave_minutes is not None and args.autosave_minutes <= 0:
         parser.error("--autosave-minutes must be more than 0")
+    if args.timelapse is not None and (args.timelapse <= 0 or not args.camera):
+        parser.error("--timelapse needs more than 0 seconds and --camera")
 
     # SIGTERM (systemctl stop, kill), SIGHUP (a closed terminal) and a first
     # Ctrl-C end the run the way --timeout does: stop the agent, stop the world,
@@ -1438,6 +1460,7 @@ def main(argv: list[str] | None = None) -> int:
         notes=args.notes.read_text() if args.notes else None,
         max_resumes=args.max_resumes,
         autosave_minutes=args.autosave_minutes,
+        timelapse=args.timelapse,
         stop=stop,
     )
     print(json.dumps(summary, indent=2))
