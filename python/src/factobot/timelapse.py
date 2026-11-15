@@ -11,24 +11,32 @@ turns into captions.
     python -m factobot.timelapse capture RUN_DIR [--every 30]   # attach to a running world
     python -m factobot.timelapse render RUN_DIR -o out.mp4      # make the video
 
-A playtest started with `--timelapse SECONDS` captures as it runs.
+A playtest started with `--timelapse SECONDS` captures as it runs. The video
+has its own camera: it crops and enlarges the frames to follow the factory the
+agent built (from the run's `world/calls.jsonl`), eases between aims so it never
+jumps, and gives each frame time by how much the factory grew in it (decision 90).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
+import multiprocessing
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections import deque
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from factobot.client import Client, FactobotError
 
@@ -391,36 +399,493 @@ def milestone_events(frames: Sequence[dict[str, Any]]) -> list[Event]:
 
 @dataclass(frozen=True)
 class Cut:
-    """One video made from the frames: its size and how its time is spent."""
+    """One video made from the frames: its size, where the factory's picture sits
+    in it, and how its time is spent: title card, the frames, the closing push-in
+    and the end card."""
 
     width: int
     height: int
     seconds: float
     intro: float
+    finale: float
     outro: float
+    # The factory's picture in the video: left, top, width and height in pixels.
+    picture: tuple[int, int, int, int]
     fps: int = 30
 
     @property
     def vertical(self) -> bool:
         return self.height > self.width
 
+    @property
+    def aspect(self) -> float:
+        return self.picture[2] / self.picture[3]
 
-LANDSCAPE = Cut(1920, 1080, seconds=90.0, intro=3.5, outro=4.5)
-VERTICAL = Cut(1080, 1920, seconds=25.0, intro=2.5, outro=3.5)
+    @property
+    def body(self) -> float:
+        """Seconds the frames get."""
+        return self.seconds - self.intro - self.finale - self.outro
+
+
+LANDSCAPE = Cut(1920, 1080, 70.0, intro=3.5, finale=6.5, outro=4.0, picture=(0, 0, 1920, 1080))
+# A square picture between the headline above and the clock and counts below,
+# with captions over its foot, all big enough to read on a phone.
+VERTICAL = Cut(1080, 1920, 23.0, intro=2.0, finale=4.5, outro=2.5, picture=(0, 400, 1080, 1080))
+BACKGROUND = (14, 14, 16)
 # Seconds a milestone caption stays up, and the least it stays when the next
 # one is due sooner.
 CAPTION_SECONDS = 2.8
 MIN_CAPTION_SECONDS = 1.4
 # The captions the short vertical cut keeps.
-HEADLINE_TITLES = frozenset(PACK_TITLES.values()) | {"Rocket silo built", "Rocket launched"}
+HEADLINE_TITLES = frozenset(PACK_TITLES.values()) | {"Rocket silo built"}
 ORANGE = "&H001C9FFF"  # #FF9F1C, as ASS writes colours (alpha, blue, green, red)
+# The backing behind all text on the picture: black, 13% transparent.
+BACKING = "&H20000000"
 URL = "github.com/8thlyr/factobot"
 
+# The video's own camera (decision 90). The frames are cropped and enlarged to
+# follow the factory, from the buildings the agent placed (`world/calls.jsonl`).
+# Items laid in long lines to outposts; they count toward how fast the factory
+# grows, but not toward its box.
+LINE_ITEMS = frozenset(
+    {
+        "transport-belt",
+        "fast-transport-belt",
+        "express-transport-belt",
+        "underground-belt",
+        "fast-underground-belt",
+        "express-underground-belt",
+        "splitter",
+        "fast-splitter",
+        "express-splitter",
+        "pipe",
+        "pipe-to-ground",
+        "small-electric-pole",
+        "medium-electric-pole",
+        "big-electric-pole",
+        "substation",
+        "burner-inserter",
+        "inserter",
+        "long-handed-inserter",
+        "fast-inserter",
+        "bulk-inserter",
+        "wooden-chest",
+        "iron-chest",
+        "steel-chest",
+    }
+)
+# What one machine counts for against one placed tile of line, in growth.
+MACHINE_WEIGHT = 4.0
+# The factory is the largest group of machines in touching chunks; what is
+# being built is the densest chunks holding this share of recent building in it.
+FOCUS_SHARE = 0.85
+# Building in this many game ticks before a frame counts as recent.
+FOCUS_WINDOW = 45 * 60 * TICKS_PER_SECOND
+# How far the picture leans from the whole factory toward what is being built
+# (0 to 1), in position and in log size.
+FOCUS_PULL = 0.6
+# Tiles of ground around what the picture shows.
+VIDEO_MARGIN = 6.0
+# The most a frame's pixels are enlarged, and the fewest tiles the picture is tall.
+MAX_ZOOM = 2.5
+MIN_TILES = 24.0
+# Seconds of video the camera's path is smoothed over (a Gaussian's sigma), and
+# how many times it is smoothed and kept inside the frames.
+CAMERA_SIGMA = 2.0
+CAMERA_PASSES = 4
+CAMERA_ZOOM = 1.25
+CAMERA_PAN = 0.12
+# Pacing: a frame's share of the video is this share of the mean growth plus its
+# own growth, smoothed over a Gaussian of PACE_SIGMA frames.
+CALM_SHARE = 0.25
+PACE_SIGMA = 4.0
+# Seconds one frame takes to dissolve into the next when it is held longer.
+FADE_SECONDS = 0.35
+# Tiles tall the closing push-in ends at, and its shares: the move to where the
+# last frame and the still meet ends at the first, the dissolve at the second.
+FINALE_TILES = 30.0
+FINALE_MEET = 0.45
+FINALE_PUSH = 0.6
 
-def _frame_seconds(cut: Cut, frames: int) -> float:
-    """Seconds of video each frame gets: what the title card, the end card and a
-    caption's hold on the last frame leave of the cut."""
-    return (cut.seconds - cut.intro - cut.outro - CAPTION_SECONDS) / frames
+
+@dataclass(frozen=True)
+class Placed:
+    """A building the agent placed (`count` > 0), or anything it mined (< 0)."""
+
+    tick: int
+    x: float
+    y: float
+    item: str
+    count: float
+
+    @property
+    def machine(self) -> bool:
+        return self.item not in LINE_ITEMS
+
+
+def read_placements(calls: Path) -> list[Placed]:
+    """What the agent built and mined, in order, from a run's `calls.jsonl`. A
+    line counts half its buildings at each end."""
+    if not calls.exists():
+        return []
+    placed = []
+    with calls.open() as lines:
+        for line in lines:
+            try:
+                call = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            response = call.get("response") or {}
+            if not response.get("ok"):
+                continue
+            params = call.get("params") or {}
+            result = response.get("result") or {}
+            tick = call["tick"]
+            if call["method"] == "place":
+                placed.append(Placed(tick, params["x"], params["y"], params["item"], 1))
+            elif call["method"] == "place_line":
+                half = max(1, result.get("tiles", 1) // (params.get("spacing") or 1)) / 2
+                placed.append(Placed(tick, params["x"], params["y"], params["item"], half))
+                placed.append(Placed(tick, params["to_x"], params["to_y"], params["item"], half))
+            elif call["method"] == "mine" and "target" in result:
+                target = result["target"]
+                at = target["position"]
+                placed.append(Placed(tick, at["x"], at["y"], target["name"], -1))
+    placed.sort(key=lambda p: p.tick)
+    return placed
+
+
+def _dense_box(points: Iterable[tuple[float, float, float]], share: float) -> Box | None:
+    """`core_box` of weighted points."""
+    chunks: dict[str, list[float]] = {}
+    for x, y, weight in points:
+        key = f"{math.floor(x / CHUNK_TILES)},{math.floor(y / CHUNK_TILES)}"
+        chunk = chunks.get(key)
+        if chunk is None:
+            chunks[key] = [weight, x, y, x, y]
+        else:
+            chunk[0] += weight
+            chunk[1], chunk[2] = min(chunk[1], x), min(chunk[2], y)
+            chunk[3], chunk[4] = max(chunk[3], x), max(chunk[4], y)
+    return core_box(chunks, share)
+
+
+def _cluster_box(points: Iterable[tuple[int, int]]) -> Box | None:
+    """The box around the largest group of `points` in touching map chunks:
+    the factory, without the outposts that empty chunks part from it."""
+    chunks: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for x, y in points:
+        chunks.setdefault((x // CHUNK_TILES, y // CHUNK_TILES), []).append((x, y))
+    best: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for start in chunks:
+        if start in seen:
+            continue
+        seen.add(start)
+        group, todo = [], [start]
+        while todo:
+            cx, cy = todo.pop()
+            group += chunks[(cx, cy)]
+            for near in ((cx + dx, cy + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)):
+                if near in chunks and near not in seen:
+                    seen.add(near)
+                    todo.append(near)
+        if len(group) > len(best):
+            best = group
+    if not best:
+        return None
+    xs, ys = [x for x, _ in best], [y for _, y in best]
+    return Box(min(xs), min(ys), max(xs), max(ys))
+
+
+def _at(center: tuple[float, float], width: float, aspect: float) -> Box:
+    x, y = center
+    height = width / aspect
+    return Box(x - width / 2, y - height / 2, x + width / 2, y + height / 2)
+
+
+def _grow(box: Box, margin: float) -> Box:
+    return Box(box.left - margin, box.top - margin, box.right + margin, box.bottom + margin)
+
+
+def _inside(box: Box, area: Box) -> Box:
+    """`box` shrunk about its centre if it must be, then moved, to lie in `area`."""
+    scale = min(1.0, area.width / box.width, area.height / box.height)
+    width, height = box.width * scale, box.height * scale
+    x = min(max(box.center[0], area.left + width / 2), area.right - width / 2)
+    y = min(max(box.center[1], area.top + height / 2), area.bottom - height / 2)
+    return Box(x - width / 2, y - height / 2, x + width / 2, y + height / 2)
+
+
+def _overlap(a: Box, b: Box) -> Box:
+    """Where `a` and `b` overlap, or `a` when they do not."""
+    box = Box(
+        max(a.left, b.left), max(a.top, b.top), min(a.right, b.right), min(a.bottom, b.bottom)
+    )
+    return box if box.width > 0 and box.height > 0 else a
+
+
+def _between(a: Box, b: Box, u: float) -> Box:
+    """`u` of the way from `a` to `b`: centre in a line, size by ratio, so a zoom
+    moves at an even pace."""
+    width = a.width * (b.width / a.width) ** u
+    center = (
+        a.center[0] + (b.center[0] - a.center[0]) * u,
+        a.center[1] + (b.center[1] - a.center[1]) * u,
+    )
+    return _at(center, width, a.width / a.height)
+
+
+def _ease(u: float) -> float:
+    u = min(1.0, max(0.0, u))
+    return u * u * (3 - 2 * u)
+
+
+def _least(record: dict[str, Any], cut: Cut) -> float:
+    """The fewest tiles across the picture may show of a frame: no more than
+    MAX_ZOOM of its pixels to one of the video's, and MIN_TILES tall."""
+    return max(cut.picture[2] / (TILE_PX * record["zoom"] * MAX_ZOOM), MIN_TILES * cut.aspect)
+
+
+def camera_targets(
+    frames: Sequence[dict[str, Any]], placements: Sequence[Placed], cut: Cut
+) -> tuple[list[Box], list[float]]:
+    """For each frame, the map area the picture aims at, and how much the agent
+    built since the frame before.
+
+    The aim leans FOCUS_PULL of the way from the whole factory (its machines,
+    not the lines out to outposts) toward what was built in the last
+    FOCUS_WINDOW ticks, no closer than the frame's pixels allow (MAX_ZOOM) and
+    no less than MIN_TILES tall, and inside the area the frame shows."""
+    aspect = cut.aspect
+    machines: dict[tuple[int, int], None] = {}
+    recent: deque[tuple[int, float, float, float]] = deque()
+    targets, growth = [], []
+    pending = iter(placements)
+    upcoming = next(pending, None)
+    for record in frames:
+        tick = record["tick"]
+        grown = 0.0
+        while upcoming is not None and upcoming.tick <= tick:
+            key = (round(upcoming.x), round(upcoming.y))
+            if upcoming.count < 0:
+                machines.pop(key, None)
+            else:
+                weight = upcoming.count * (MACHINE_WEIGHT if upcoming.machine else 1)
+                grown += weight
+                recent.append((upcoming.tick, upcoming.x, upcoming.y, weight))
+                if upcoming.machine:
+                    machines[key] = None
+            upcoming = next(pending, None)
+        while recent and recent[0][0] < tick - FOCUS_WINDOW:
+            recent.popleft()
+        growth.append(grown)
+        shown = Box(*record["box"])
+        least = _least(record, cut)
+        factory = _cluster_box(machines)
+        if factory is None:
+            targets.append(_inside(_at(shown.center, max(least, shown.width), aspect), shown))
+            continue
+        whole = _fit(_grow(factory, VIDEO_MARGIN), aspect, 0)
+        here = _grow(factory, CHUNK_TILES)
+        building = (
+            _dense_box(
+                (
+                    (x, y, w)
+                    for _, x, y, w in recent
+                    if here.left <= x <= here.right and here.top <= y <= here.bottom
+                ),
+                FOCUS_SHARE,
+            )
+            or factory
+        )
+        near = _fit(_grow(building, VIDEO_MARGIN), aspect, 0)
+        aim = _between(whole, near, FOCUS_PULL)
+        if aim.width < least:
+            aim = _at(aim.center, least, aspect)
+        aim = (
+            _inside(aim, whole)
+            if aim.width <= whole.width
+            else _at(whole.center, aim.width, aspect)
+        )
+        targets.append(_inside(aim, shown))
+    return targets, growth
+
+
+def _smooth(values: Sequence[float], sigma: float) -> list[float]:
+    """`values` averaged over a Gaussian of `sigma` places."""
+    reach = int(3 * sigma) + 1
+    kernel = [math.exp(-(d * d) / (2 * sigma * sigma)) for d in range(-reach, reach + 1)]
+    out = []
+    for i in range(len(values)):
+        total = weights = 0.0
+        for d, k in zip(range(-reach, reach + 1), kernel, strict=True):
+            if 0 <= i + d < len(values):
+                total += k * values[i + d]
+                weights += k
+        out.append(total / weights)
+    return out
+
+
+def frame_durations(growth: Sequence[float], seconds: float) -> list[float]:
+    """Seconds of video for each frame, `seconds` in all: frames where the
+    factory grows fast get more time than ones where it stands still."""
+    smoothed = _smooth(growth, PACE_SIGMA)
+    calm = CALM_SHARE * sum(smoothed) / len(smoothed)
+    if calm <= 0:
+        return [seconds / len(growth)] * len(growth)
+    weights = [calm + value for value in smoothed]
+    total = sum(weights)
+    return [seconds * weight / total for weight in weights]
+
+
+def smooth_camera(aims: Sequence[Box], areas: Sequence[Box], fps: int) -> list[Box]:
+    """The picture's map area in each video frame, given where it aims and the
+    area its pictures cover there.
+
+    The aims are averaged over a Gaussian of CAMERA_SIGMA seconds, so the camera
+    eases from one aim to the next, then kept inside the pictures; doing both
+    CAMERA_PASSES times lets it ease into a narrower picture ahead of time. The
+    camera then zooms no faster than CAMERA_ZOOM a second, narrowing early
+    rather than late, and pans no faster than CAMERA_PAN of its width a second,
+    so a frame that covers more than the one before (the capture zoomed out)
+    opens the picture gradually instead of in one jump."""
+    aspect = aims[0].width / aims[0].height
+    path = list(aims)
+    sigma = CAMERA_SIGMA * fps
+    for _ in range(CAMERA_PASSES):
+        xs = _smooth([box.center[0] for box in path], sigma)
+        ys = _smooth([box.center[1] for box in path], sigma)
+        sizes = _smooth([math.log(box.width) for box in path], sigma)
+        path = [
+            _inside(_at((x, y), math.exp(size), aspect), area)
+            for x, y, size, area in zip(xs, ys, sizes, areas, strict=True)
+        ]
+    step = math.log(CAMERA_ZOOM) / fps
+    sizes = [math.log(box.width) for box in path]
+    for n in range(1, len(sizes)):
+        sizes[n] = min(sizes[n], sizes[n - 1] + step)
+    for n in range(len(sizes) - 2, -1, -1):
+        sizes[n] = min(sizes[n], sizes[n + 1] + step)
+    path = [
+        _inside(_at(box.center, math.exp(size), aspect), area)
+        for box, size, area in zip(path, sizes, areas, strict=True)
+    ]
+
+    def toward(box: Box, previous: Box, area: Box) -> Box:
+        reach = CAMERA_PAN * box.width / fps
+        (x, y), (px, py) = box.center, previous.center
+        x = min(max(x, px - reach), px + reach)
+        y = min(max(y, py - reach), py + reach)
+        return _inside(_at((x, y), box.width, aspect), area)
+
+    # Forward, back (to set off early toward an area that will pin the camera),
+    # and forward again, since a pinned frame cannot follow the backward pass.
+    for n in range(1, len(path)):
+        path[n] = toward(path[n], path[n - 1], areas[n])
+    for n in range(len(path) - 2, -1, -1):
+        path[n] = toward(path[n], path[n + 1], areas[n])
+    for n in range(1, len(path)):
+        path[n] = toward(path[n], path[n - 1], areas[n])
+    return path
+
+
+@dataclass(frozen=True)
+class Layer:
+    """A picture of the map `area` covers, blended in at `weight`."""
+
+    path: str
+    area: Box
+    weight: float
+
+
+@dataclass(frozen=True)
+class Shot:
+    """One video frame: the layers, and the map area the picture shows."""
+
+    layers: tuple[Layer, ...]
+    camera: Box
+
+
+def _still(path: Path, area: Box, camera: Box) -> Shot:
+    return Shot((Layer(os.fspath(path), area, 1.0),), _inside(camera, area))
+
+
+def body_layers(
+    files: Sequence[Path],
+    areas: Sequence[Box],
+    starts: Sequence[float],
+    durations: Sequence[float],
+    count: int,
+    fps: int,
+) -> list[tuple[tuple[Layer, ...], Box, int]]:
+    """For each of `count` video frames at `fps`: the frames blended there, the
+    map area they all cover, and the frame on screen. Each frame is held for its
+    duration, then dissolves into the next over FADE_SECONDS or its whole
+    duration, whichever is shorter."""
+    shown = []
+    index = 0
+    for n in range(count):
+        t = n / fps
+        while index + 1 < len(files) and starts[index + 1] <= t:
+            index += 1
+        following = min(index + 1, len(files) - 1)
+        fade = min(durations[index], FADE_SECONDS)
+        weight = 0.0
+        if following != index:
+            weight = _ease((t - starts[index] - durations[index] + fade) / fade)
+        layers = [Layer(os.fspath(files[index]), areas[index], 1 - weight)]
+        area = areas[index]
+        if weight > 0:
+            layers.append(Layer(os.fspath(files[following]), areas[following], weight))
+            area = _overlap(area, areas[following])
+        shown.append((tuple(layers), area, index))
+    return shown
+
+
+def finale_shots(
+    last: Path,
+    last_area: Box,
+    least: float,
+    camera: Box,
+    focus: tuple[float, float],
+    still: tuple[Path, Box] | None,
+    cut: Cut,
+) -> list[Shot]:
+    """A slow push-in on `focus` (the rocket silo) from where the frames end.
+
+    With `still`, a sharper picture of the map area its box covers, the camera
+    first moves to the largest view that both pictures cover, dissolves into the
+    still there, then pushes in on it. Without one it pushes in on the last frame
+    as far as MAX_ZOOM allows (`least` tiles across)."""
+    count = round(cut.finale * cut.fps)
+    aspect = cut.aspect
+    end_width = FINALE_TILES * aspect
+    if still is None:
+        end = _inside(_at(focus, max(end_width, least), aspect), last_area)
+        return [
+            _still(last, last_area, _between(camera, end, _ease(n / max(1, count - 1))))
+            for n in range(count)
+        ]
+    still_path, still_area = still
+    meet = _inside(_at(focus, camera.width, aspect), _overlap(last_area, still_area))
+    end = _inside(_at(focus, end_width, aspect), still_area)
+    shots = []
+    for n in range(count):
+        u = n / max(1, count - 1)
+        if u < FINALE_MEET:
+            shots.append(_still(last, last_area, _between(camera, meet, _ease(u / FINALE_MEET))))
+        elif u < FINALE_PUSH:
+            weight = _ease((u - FINALE_MEET) / (FINALE_PUSH - FINALE_MEET))
+            layers = (
+                Layer(os.fspath(last), last_area, 1 - weight),
+                Layer(os.fspath(still_path), still_area, weight),
+            )
+            shots.append(Shot(layers, meet))
+        else:
+            push = _between(meet, end, _ease((u - FINALE_PUSH) / (1 - FINALE_PUSH)))
+            shots.append(_still(still_path, still_area, push))
+    return shots
 
 
 def caption_times(wanted: Sequence[float], end: float) -> list[tuple[float, float] | None]:
@@ -461,34 +926,17 @@ def _ass_time(seconds: float) -> str:
 
 
 def _ass_styles(cut: Cut) -> str:
-    # Sizes scale with the shorter side, so both cuts keep the same proportions.
-    unit = min(cut.width, cut.height) / 1080
-    pad = round(40 * unit)
-    big = round(60 * unit * (1.25 if cut.vertical else 1))
+    # name, font, size, bold, boxed, alignment, margin v. The clock and counts
+    # sit in the corners of the landscape cut and under the picture in the
+    # vertical one; captions sit at the bottom of either.
+    pad = 36
+    # Vertical captions sit over the foot of the picture, above the clock.
+    caption_margin = cut.height - cut.picture[1] - cut.picture[3] + 30 if cut.vertical else 60
     styles = [
-        # name, font, size, colour, box (BorderStyle 3 draws one), alignment, margin v
-        (
-            "Clock",
-            "JetBrains Mono",
-            round(34 * unit * (1.3 if cut.vertical else 1)),
-            1,
-            pad,
-        ),
-        (
-            "Counts",
-            "DejaVu Sans",
-            round(26 * unit * (1.3 if cut.vertical else 1)),
-            3,
-            pad,
-        ),
-        (
-            "Caption",
-            "DejaVu Sans",
-            big,
-            8 if not cut.vertical else 2,
-            round(70 * unit) if not cut.vertical else round(250 * unit),
-        ),
-        ("Card", "DejaVu Sans", round(48 * unit), 5, 0),
+        ("Clock", "JetBrains Mono", 64 if cut.vertical else 68, 1, True, 7, pad),
+        ("Counts", "DejaVu Sans", 46 if cut.vertical else 50, 0, True, 9, pad),
+        ("Caption", "DejaVu Sans", 84 if cut.vertical else 104, 1, True, 2, caption_margin),
+        ("Card", "DejaVu Sans", 52, 1, False, 5, 0),
     ]
     lines = [
         "[V4+ Styles]",
@@ -496,14 +944,13 @@ def _ass_styles(cut: Cut) -> str:
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     ]
-    for name, font, size, align, margin in styles:
-        boxed = name in ("Clock", "Counts")
+    for name, font, size, bold, boxed, align, margin in styles:
+        # BorderStyle 3 draws a box in the outline colour, Outline pixels round the text.
         lines.append(
             f"Style: {name},{font},{size},&H00FFFFFF,&H00FFFFFF,"
-            f"{'&H58000000' if boxed else '&H00000000'},&H90000000,"
-            f"{1 if name != 'Counts' else 0},0,0,0,100,100,0,0,"
-            f"{3 if boxed else 1},{round(10 * unit) if boxed else round(3 * unit)},"
-            f"{0 if boxed else round(2 * unit)},{align},{pad},{pad},{margin},1"
+            f"{BACKING if boxed else '&H00000000'},&H90000000,{bold},0,0,0,100,100,0,0,"
+            f"{3 if boxed else 1},{14 if boxed else 3},{0 if boxed else 2},"
+            f"{align},{pad},{pad},{margin},1"
         )
     return "\n".join(lines)
 
@@ -513,20 +960,25 @@ def overlay_ass(
     events: Sequence[Event],
     cut: Cut,
     *,
+    starts: Sequence[float],
     started: datetime,
     title: str,
+    subline: str,
+    band: str,
     outcome: str,
 ) -> str:
     """The video's text as an ASS subtitle script: title card, clock, building
-    counts, milestone captions and end card, timed to `cut`."""
-    step = _frame_seconds(cut, len(frames))
+    counts, milestone captions, the outcome over the push-in and the end card.
+    `starts` is the video time each frame comes on; `band` is the line under the
+    vertical cut's headline."""
     end = cut.seconds
-    unit = min(cut.width, cut.height) / 1080
+    body_end = cut.intro + cut.body
+    finale_end = body_end + cut.finale
     dim = (
-        f"{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H50&\\p1}}"
+        f"{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H40&\\p1}}"
         f"m 0 0 l {cut.width} 0 {cut.width} {cut.height} 0 {cut.height}{{\\p0}}"
     )
-    logo = f"{{\\fs{round(130 * unit)}\\c{ORANGE}\\b1}}factobot"
+    logo = f"{{\\fs{160 if cut.vertical else 170}\\c{ORANGE}\\b1}}factobot"
     rows = []
 
     def add(layer: int, start: float, stop: float, style: str, text: str) -> None:
@@ -534,16 +986,15 @@ def overlay_ass(
             f"Dialogue: {layer},{_ass_time(start)},{_ass_time(stop)},{style},,0,0,0,,{text}"
         )
 
-    small = round(34 * unit)
+    small = 50 if cut.vertical else 56
     add(0, 0, cut.intro, "Card", f"{{\\fad(0,500)}}{dim}")
     add(
         1,
         0,
         cut.intro,
         "Card",
-        f"{{\\fad(300,500)}}{logo}\\N{{\\fs{round(52 * unit)}\\c&HFFFFFF&\\b1}}{title}"
-        f"\\N{{\\fs{small}\\b0\\c&HDDDDDD&}}Factorio from a fresh map, played in real time "
-        "through a command-line tool",
+        f"{{\\fad(300,500)}}{logo}\\N{{\\fs{72 if cut.vertical else 76}\\c&HFFFFFF&\\b1}}{title}"
+        f"\\N{{\\fs{small}\\b0\\c&HE6E6E6&}}{subline}",
     )
     add(0, end - cut.outro, end, "Card", f"{{\\fad(500,0)}}{dim}")
     add(
@@ -551,47 +1002,41 @@ def overlay_ass(
         end - cut.outro,
         end,
         "Card",
-        f"{{\\fad(500,0)}}{logo}\\N{{\\fs{round(48 * unit)}\\b1\\c&HFFFFFF&}}{outcome}"
-        f"\\N{{\\fs{small}\\b0\\c&HDDDDDD&}}{URL}",
+        f"{{\\fad(500,0)}}{logo}\\N{{\\fs{small + 8}\\b0\\c&HFFFFFF&}}{URL}",
     )
-    body_end = end - cut.outro
+    below = cut.picture[1] + cut.picture[3]
     if cut.vertical:
-        # The space above the picture holds what the video is about.
+        # The band above the picture holds what the video is about.
         add(
             1,
             cut.intro,
-            body_end,
+            end - cut.outro,
             "Card",
-            f"{{\\an8\\pos({cut.width // 2},{round(110 * unit)})\\fs{round(64 * unit)}\\b1}}"
-            f"{title}\\N{{\\fs{round(40 * unit)}\\b0\\c&HDDDDDD&}}Factorio from a fresh map,"
-            "\\Nin real time",
+            f"{{\\an8\\pos({cut.width // 2},40)\\fs68\\b1}}{title}"
+            f"\\N{{\\fs46\\b0\\c&HE6E6E6&}}{band}",
         )
     # The clock and counts change when the text does, not on every frame.
     shown: list[tuple[float, str, str]] = []
-    for index, record in enumerate(frames):
-        at = cut.intro + index * step
+    for record, at in zip(frames, starts, strict=True):
         wall = (_parse_time(record["time"]) - started).total_seconds()
-        sep = "\\N" if cut.vertical else "   "
-        clock = f"game {_clock(record['tick'] / TICKS_PER_SECOND)}{sep}real {_clock(wall)}"
+        clock = f"game {_clock(record['tick'] / TICKS_PER_SECOND)}  real {_clock(wall)}"
         parts = []
         for key, label in SHOWN_COUNTS:
             count = record["counts"].get(key, 0)
             parts.append(f"{count:,} {label if count != 1 else label.removesuffix('s')}")
-        if cut.vertical:
-            counts = "\\N".join("  ".join(parts[i : i + 2]) for i in range(0, len(parts), 2))
-        else:
-            counts = sep.join(parts)
+        counts = f"{parts[0]} · {parts[1]}\\N{parts[2]} · {parts[3]}"
         if not shown or shown[-1][1:] != (clock, counts):
             shown.append((at, clock, counts))
+    clock_at = f"{{\\an8\\pos({cut.width // 2},{below + 30})}}" if cut.vertical else ""
+    counts_at = f"{{\\an8\\pos({cut.width // 2},{below + 140})}}" if cut.vertical else ""
     for (at, clock, counts), following in zip(shown, [*shown[1:], None], strict=True):
         stop = following[0] if following else body_end
-        add(2, at, stop, "Clock", clock)
-        add(2, at, stop, "Counts", counts)
-    detail = round(30 * unit * (1.3 if cut.vertical else 1))
+        add(2, at, stop, "Clock", clock_at + clock)
+        add(2, at, stop, "Counts", counts_at + counts)
     if cut.vertical:
-        # 25 seconds hold only the science tiers and the rocket.
+        # 23 seconds hold only the science tiers and the silo.
         events = [event for event in events if event.title in HEADLINE_TITLES]
-    wanted = [cut.intro + event.frame * step for event in events]
+    wanted = [starts[event.frame] for event in events]
     for event, times in zip(events, caption_times(wanted, body_end), strict=True):
         if times is None:
             continue
@@ -599,9 +1044,20 @@ def overlay_ass(
             3,
             *times,
             "Caption",
-            f"{{\\fad(200,350)}}{event.title}\\N{{\\fs{detail}\\b0}}"
+            f"{{\\fad(200,350)}}{event.title}\\N{{\\fs{small + 6}\\b0}}"
             f"after {_clock(event.tick / TICKS_PER_SECOND)} of game time",
         )
+    # The outcome over the push-in, once the camera has closed in.
+    said, _, rest = outcome.partition(" after ")
+    if rest:
+        outcome = f"{said}\\N{{\\fs{small + 6}\\b0}}after {rest}"
+    add(
+        3,
+        body_end + cut.finale * FINALE_MEET,
+        finale_end,
+        "Caption",
+        f"{{\\fad(500,300)}}{outcome}",
+    )
     header = (
         f"[Script Info]\nScriptType: v4.00+\nPlayResX: {cut.width}\nPlayResY: {cut.height}\n"
         "WrapStyle: 0\nScaledBorderAndShadow: yes\n\n"
@@ -629,7 +1085,7 @@ def _run_start(run_dir: Path, frames: Sequence[dict[str, Any]]) -> datetime:
 
 
 def outcome_line(frames: Sequence[dict[str, Any]], events: Sequence[Event]) -> str:
-    """The end card's sentence: the rocket's game time, else the last milestone's."""
+    """The closing sentence: the rocket's game time, else the last milestone's."""
     last = frames[-1]
     launched = last.get("rocket_launched_tick")
     if launched is not None:
@@ -640,27 +1096,75 @@ def outcome_line(frames: Sequence[dict[str, Any]], events: Sequence[Event]) -> s
     return f"{hours} of game time"
 
 
-def _video_filter(cut: Cut, ass: Path) -> str:
-    """The ffmpeg filter graph from the concatenated frames to the finished picture.
+# Each drawing process keeps the last few pictures it decoded: neighbouring
+# video frames share them.
+_pictures: dict[str, Image.Image] = {}
+_cut: Cut = LANDSCAPE
 
-    `framerate` blends neighbouring frames, so frames shorter than the output's
-    frame time fade into each other instead of jumping."""
-    subtitles = f"ass='{ass}'"
-    smooth = f"framerate=fps={cut.fps}:interp_start=0:interp_end=255:scene=100"
-    if not cut.vertical:
-        return (
-            f"[0:v]{smooth},scale={cut.width}:{cut.height}:flags=lanczos,"
-            f"setsar=1,format=yuv420p,{subtitles}[v]"
+
+def _start_drawing(cut: Cut) -> None:
+    global _cut
+    _cut = cut
+
+
+def _picture(path: str) -> Image.Image:
+    picture = _pictures.get(path)
+    if picture is None:
+        if len(_pictures) >= 4:
+            del _pictures[next(iter(_pictures))]
+        with Image.open(path) as opened:
+            picture = opened.convert("RGB")
+        _pictures[path] = picture
+    return picture
+
+
+def _draw(shot: Shot) -> bytes:
+    """A video frame as raw RGB."""
+    x, y, width, height = _cut.picture
+    camera = shot.camera
+    out: Image.Image | None = None
+    held = 0.0
+    for layer in shot.layers:
+        if layer.weight <= 0:
+            continue
+        picture = _picture(layer.path)
+        area = layer.area
+        sx, sy = picture.width / area.width, picture.height / area.height
+        box = (
+            max(0.0, (camera.left - area.left) * sx),
+            max(0.0, (camera.top - area.top) * sy),
+            min(float(picture.width), (camera.right - area.left) * sx),
+            min(float(picture.height), (camera.bottom - area.top) * sy),
         )
-    # Vertical: a square from the middle of the frame, where the factory is,
-    # over a blurred, darkened copy of the frame that fills the rest of the screen.
-    return (
-        f"[0:v]{smooth},split[a][b];"
-        f"[a]scale=-2:{cut.height},crop={cut.width}:{cut.height},gblur=sigma=40,"
-        "eq=brightness=-0.22:saturation=0.8[bg];"
-        f"[b]crop=ih:ih,scale={cut.width}:{cut.width}:flags=lanczos[fg];"
-        f"[bg][fg]overlay=0:(H-h)/2,setsar=1,format=yuv420p,{subtitles}[v]"
-    )
+        part = picture.resize((width, height), Image.Resampling.LANCZOS, box=box)
+        held += layer.weight
+        out = part if out is None else Image.blend(out, part, layer.weight / held)
+    assert out is not None
+    if (x, y, width, height) == (0, 0, _cut.width, _cut.height):
+        return out.tobytes()
+    canvas = Image.new("RGB", (_cut.width, _cut.height), BACKGROUND)
+    canvas.paste(out, (x, y))
+    return canvas.tobytes()
+
+
+def _silo(placements: Sequence[Placed]) -> tuple[float, float] | None:
+    silos = [p for p in placements if p.item == "rocket-silo" and p.count > 0]
+    return (silos[-1].x, silos[-1].y) if silos else None
+
+
+def _sublines(summary: dict[str, Any]) -> tuple[str, str]:
+    """The title card's line and the vertical cut's band: where the run started,
+    and whether a skill helped (decision 77). A run still going has no summary."""
+    game = "Factorio in real time"
+    if summary:
+        where = "a fresh map" if summary.get("save") is None else "a saved game"
+        game = f"Factorio from {where}, in real time"
+    subline = f"{game},\\Nthrough a command-line tool."
+    band = game
+    if summary.get("skills") or summary.get("skill_sha256"):
+        subline += "\\NAssisted run with a Factorio skill."
+        band += "\\Nassisted run with a Factorio skill"
+    return subline, band
 
 
 def render(
@@ -669,9 +1173,12 @@ def render(
     cut: Cut,
     *,
     title: str | None = None,
+    end_still: tuple[Path, Box] | None = None,
     ffmpeg: str = "ffmpeg",
 ) -> Path:
-    """Make the video of the frames captured in `run_dir` and write it to `out`."""
+    """Make the video of the frames captured in `run_dir` and write it to `out`.
+    `end_still` is a sharper picture of the map area its box covers, for the
+    closing push-in."""
     directory = run_dir / "timelapse"
     frames = read_frames(directory)
     if len(frames) < 2:
@@ -684,33 +1191,45 @@ def render(
     if launched is not None and frames[-1].get("rocket_launched_tick") is None:
         frames = [*frames[:-1], {**frames[-1], "rocket_launched_tick": launched}]
     events = milestone_events(frames)
+    outcome = outcome_line(frames, events)
+    # The launch closes the video over the push-in, not as a caption.
+    events = [event for event in events if event.title != "Rocket launched"]
     if title is None:
         model = summary.get("model")
         title = f"{model} builds a factory" if model else "An AI agent builds a factory"
-    step = _frame_seconds(cut, len(frames))
+    subline, band = _sublines(summary)
+
+    placements = read_placements(run_dir / "world" / "calls.jsonl")
+    targets, growth = camera_targets(frames, placements, cut)
+    durations = frame_durations(growth, cut.body)
+    starts = [sum(durations[:i]) for i in range(len(durations))]
+    files = [directory / record["file"] for record in frames]
+    areas = [Box(*record["box"]) for record in frames]
+    shown = body_layers(files, areas, starts, durations, round(cut.body * cut.fps), cut.fps)
+    cameras = smooth_camera(
+        [targets[index] for _, _, index in shown], [area for _, area, _ in shown], cut.fps
+    )
+    body = [Shot(layers, camera) for (layers, _, _), camera in zip(shown, cameras, strict=True)]
+    opening = _still(files[0], areas[0], cameras[0])
+    focus = _silo(placements) or body[-1].camera.center
+    least = _least(frames[-1], cut)
+    finale = finale_shots(files[-1], areas[-1], least, body[-1].camera, focus, end_still, cut)
+    shots = [opening] * round(cut.intro * cut.fps) + body + finale
+    shots += [shots[-1]] * (round(cut.seconds * cut.fps) - len(shots))
+
     with tempfile.TemporaryDirectory(prefix="factobot-timelapse-") as scratch:
-        work = Path(scratch)
-        # The first and last frames are listed twice, so the title card, the
-        # last caption and the end card sit on a still picture.
-        first, last = directory / frames[0]["file"], directory / frames[-1]["file"]
-        entries = [(first, cut.intro)]
-        entries += [(directory / record["file"], step) for record in frames]
-        entries += [(last, CAPTION_SECONDS + cut.outro), (last, cut.outro)]
-        (work / "frames.txt").write_text(
-            "ffconcat version 1.0\n"
-            + "".join(
-                f"file '{path.absolute()}'\nduration {seconds:.6f}\n" for path, seconds in entries
-            )
-        )
-        ass = work / "overlay.ass"
+        ass = Path(scratch) / "overlay.ass"
         ass.write_text(
             overlay_ass(
                 frames,
                 events,
                 cut,
+                starts=[cut.intro + start for start in starts],
                 started=_run_start(run_dir, frames),
                 title=title,
-                outcome=outcome_line(frames, events),
+                subline=subline,
+                band=band,
+                outcome=outcome,
             )
         )
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -721,17 +1240,17 @@ def render(
             "error",
             "-y",
             "-f",
-            "concat",
-            "-safe",
-            "0",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{cut.width}x{cut.height}",
+            "-r",
+            str(cut.fps),
             "-i",
-            os.fspath(work / "frames.txt"),
-            "-filter_complex",
-            _video_filter(cut, ass),
-            "-map",
-            "[v]",
-            "-t",
-            f"{cut.seconds:.3f}",
+            "-",
+            "-vf",
+            f"ass='{ass}',format=yuv420p",
             "-c:v",
             "libx264",
             "-preset",
@@ -739,24 +1258,34 @@ def render(
             "-crf",
             "18",
             # Under the upload limits of the common video sites (X takes 512 MB):
-            # blended frames of grass and ore are noisy and need many bits.
+            # grass and ore are noisy and need many bits.
             "-maxrate",
             "16M",
             "-bufsize",
             "32M",
-            "-pix_fmt",
-            "yuv420p",
             "-movflags",
             "+faststart",
             os.fspath(out),
         ]
-        subprocess.run(command, check=True)
+        encoder = subprocess.Popen(command, stdin=subprocess.PIPE)
+        assert encoder.stdin is not None
+        with multiprocessing.Pool(initializer=_start_drawing, initargs=(cut,)) as pool:
+            for picture in pool.imap(_draw, shots, chunksize=8):
+                encoder.stdin.write(picture)
+        encoder.stdin.close()
+        if encoder.wait() != 0:
+            raise SystemExit(f"ffmpeg failed with exit code {encoder.returncode}")
     return out
 
 
 def _size(text: str) -> tuple[int, int]:
     width, _, height = text.partition("x")
     return int(width), int(height)
+
+
+def _area(text: str) -> tuple[float, float, float]:
+    x, y, across = (float(part) for part in text.split(","))
+    return x, y, across
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -777,23 +1306,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--vertical",
         action="store_true",
         help=f"a {VERTICAL.width}x{VERTICAL.height} cut of {VERTICAL.seconds:.0f} s instead of "
-        f"{LANDSCAPE.width}x{LANDSCAPE.height}",
+        f"{LANDSCAPE.width}x{LANDSCAPE.height} of {LANDSCAPE.seconds:.0f} s",
     )
     make.add_argument("--seconds", type=float, help="length of the video")
     make.add_argument("--title", help="the title card's headline [default: from the model]")
+    make.add_argument(
+        "--end-still",
+        type=Path,
+        help="a sharper picture to push in on at the end, such as a 4K screenshot of the "
+        "rocket silo from the run's last save; needs --end-still-area",
+    )
+    make.add_argument(
+        "--end-still-area",
+        type=_area,
+        metavar="X,Y,TILES",
+        help="the map point at the centre of --end-still and how many tiles across it shows",
+    )
     args = parser.parse_args(argv)
     if args.command == "capture":
         capture(args.run_dir, args.every, args.size, poll_seconds=2.0)
     else:
         cut = VERTICAL if args.vertical else LANDSCAPE
         if args.seconds is not None:
-            shortest = cut.intro + cut.outro + CAPTION_SECONDS
+            shortest = cut.intro + cut.finale + cut.outro + CAPTION_SECONDS
             if args.seconds <= shortest:
                 parser.error(f"--seconds must be more than {shortest:g}")
-            cut = Cut(cut.width, cut.height, args.seconds, cut.intro, cut.outro, cut.fps)
+            cut = replace(cut, seconds=args.seconds)
+        if (args.end_still is None) != (args.end_still_area is None):
+            parser.error("--end-still and --end-still-area go together")
         if shutil.which("ffmpeg") is None:
             parser.error("render needs ffmpeg on PATH")
-        print(render(args.run_dir, args.out, cut, title=args.title))
+        still = None
+        if args.end_still is not None:
+            x, y, across = args.end_still_area
+            with Image.open(args.end_still) as picture:
+                aspect = picture.width / picture.height
+            still = (args.end_still, _at((x, y), across, aspect))
+        print(render(args.run_dir, args.out, cut, title=args.title, end_still=still))
     return 0
 
 

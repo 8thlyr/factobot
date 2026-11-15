@@ -78,7 +78,7 @@ description = "Rocket run (decision 77): an agent with the factorio-rocket skill
 run = "cargo build --locked && FACTOBOT_FAC=$PWD/target/debug/fac uv run --project python python -m factobot.playtest playtests/rocket.md --agent ${HARNESS:-omp} --model ${MODEL:-claude-opus-5-5} --seed ${SEED:-1} ${SAVE:+--save \"$SAVE\"} ${NOTES:+--notes \"$NOTES\"} --skill skills/factorio-rocket --camera --until rocket --timeout ${TIMEOUT:-172800} --max-resumes 100 --autosave-minutes 10 --timelapse ${TIMELAPSE:-30} --listen $(tailscale ip -4)"
 
 [tasks.timelapse]
-description = "Video from a run's timelapse frames (decision 89), with ffmpeg: mise run timelapse -- target/playtests/<run> -o out.mp4 [--vertical] [--seconds N] [--title TEXT]. 1920x1080 and 90 s by default; --vertical makes a 1080x1920 cut of 25 s"
+description = "Video from a run's timelapse frames (decisions 89 and 90), with Pillow and ffmpeg: mise run timelapse -- target/playtests/<run> -o out.mp4 [--vertical] [--seconds N] [--title TEXT] [--end-still PNG --end-still-area X,Y,TILES]. 1920x1080 and 70 s by default; --vertical makes a 1080x1920 cut of 23 s"
 run = "uv run --project python python -m factobot.timelapse render"
 
 [tasks.agent-view]

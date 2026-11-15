@@ -1,20 +1,72 @@
-"""Timelapse framing and captions: the picture keeps the factory in view without
-jumping or pumping, and captions name what happened during the run, at the tick
-it happened."""
+"""Timelapse framing, pacing and captions: the picture keeps the factory in view
+without jumping or pumping, the video spends its time where the factory grows,
+and captions name what happened during the run, at the tick it happened."""
 
 from __future__ import annotations
 
+from itertools import pairwise
 from typing import Any
 
+import pytest
+
 from factobot.timelapse import (
+    CAMERA_PAN,
+    CAMERA_ZOOM,
     CAPTION_SECONDS,
+    LANDSCAPE,
     MIN_CAPTION_SECONDS,
     Box,
+    Placed,
+    camera_targets,
     caption_times,
     core_box,
+    frame_durations,
     milestone_events,
     next_frame,
+    smooth_camera,
 )
+
+
+def test_the_video_camera_opens_gradually_when_the_frames_widen() -> None:
+    # The capture zoomed out between two frames, from 60 tiles across to 200,
+    # while the factory wanted 150 across all along.
+    fps = 30
+    narrow, wide = Box(0, 0, 60, 33.75), Box(-70, -40, 130, 72.5)
+    areas = [narrow] * 60 + [wide] * 540
+    path = smooth_camera([Box(-45, -20, 105, 64.375)] * 600, areas, fps)
+    for box, area in zip(path, areas, strict=True):
+        assert area.left - 1e-6 <= box.left and box.right <= area.right + 1e-6
+        assert area.top - 1e-6 <= box.top and box.bottom <= area.bottom + 1e-6
+    for before, after in pairwise(path):
+        assert after.width / before.width <= CAMERA_ZOOM ** (1 / fps) + 1e-9
+        moved = max(
+            abs(after.center[0] - before.center[0]), abs(after.center[1] - before.center[1])
+        )
+        assert moved <= CAMERA_PAN * max(before.width, after.width) / fps + 1e-6
+    assert path[-1].width == pytest.approx(150, rel=1e-3)
+
+
+def test_the_video_frames_the_factory_and_not_an_outpost() -> None:
+    factory = [
+        Placed(10, x, y, "assembling-machine-1", 1)
+        for x in range(0, 60, 4)
+        for y in range(0, 30, 4)
+    ]
+    # Drills on a far ore patch, and the pipe out to them.
+    outpost = [Placed(20, 400 + x, 10, "electric-mining-drill", 1) for x in range(0, 30, 3)]
+    pipe = [Placed(20, x, 12, "pipe", 1) for x in range(60, 400)]
+    frame = {"tick": 100, "box": [-30, -30, 450, 240], "zoom": 0.125}
+    (aim,), _ = camera_targets([frame], factory + outpost + pipe, LANDSCAPE)
+    assert aim.left <= 0 and aim.right >= 56 and aim.top <= 0 and aim.bottom >= 28
+    assert aim.right < 300
+
+
+def test_busy_stretches_get_more_of_the_video_than_calm_ones() -> None:
+    growth = [0.0] * 50 + [40.0] * 50 + [0.0] * 50
+    durations = frame_durations(growth, 60.0)
+    assert sum(durations) == pytest.approx(60.0)
+    assert durations[75] > 3 * durations[10]
+    assert min(durations) > 0
 
 
 def test_crowded_captions_are_shortened_or_dropped_never_late() -> None:
