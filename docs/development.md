@@ -14,15 +14,15 @@ Any Linux machine can take either role.
 [mise](https://mise.jdx.dev) pins every tool (Rust, uv, StyLua, lua-language-server, Node and FMTK) and the Factorio version with its checksums. From a fresh checkout:
 
 ```bash
-mise trust && mise install          # toolchain
-uv sync --project python            # Python env in python/.venv
-mise run fetch-factorio             # free headless server into ~/.cache/factobot/factorio/<version>
-mise run check                      # everything CI runs
+mise trust && mise install                         # toolchain
+mise exec -- uv sync --project python --locked     # Python env in python/.venv
+mise run fetch-factorio                            # free headless server into ~/.cache/factobot/factorio/<version>
+mise run check                                     # everything CI runs
 ```
 
 `mise tasks` lists the rest: `fmt`, `lint`, `test`, `luals-types`, `dev`, `playtest`, `agent-view`. `lint` generates lua-language-server types for the pinned Factorio API with FMTK (into `target/factorio-luals`), so a misspelled field or method on a game object fails lint before it reaches the game.
 
-Screenshots, the live viewer and the camera also need Xvfb and Mesa (`sudo pacman -S --needed xorg-server-xvfb mesa` on Arch) and the graphical client: `mise run fetch-factorio -- --client` (needs `FACTORIO_TOKEN`).
+Screenshots, the live viewer and the camera also need Xvfb and Mesa (`sudo pacman -S --needed xorg-server-xvfb mesa` on Arch) and the graphical client: `mise run fetch-factorio -- --client` (needs `FACTORIO_USERNAME` and `FACTORIO_TOKEN`, see Secrets).
 
 Playtests also need bubblewrap, slirp4netns, nsenter (util-linux), iproute2 and nftables (`sudo pacman -S --needed bubblewrap slirp4netns util-linux iproute2 nftables` on Arch).
 
@@ -39,7 +39,7 @@ Playtests also need bubblewrap, slirp4netns, nsenter (util-linux), iproute2 and 
 ## Running a game by hand
 
 ```bash
-cargo build
+mise exec -- cargo build --locked
 target/debug/fac daemon --seed 42             # foreground; Ctrl-C saves and stops the server
 target/debug/fac status                       # in another shell
 ```
@@ -69,7 +69,7 @@ fac dev screenshot --at 10,-4 --zoom 0.5 -o /tmp/base.png   # needs a daemon sta
 
 ### Seeing the game
 
-The daemon can keep two graphical spectator clients connected, and other machines can join with `fac watch`. The mod turns every player into a bodiless spectator, and puts it in the `factobot-spectators` permission group, which denies every input action except moving the view, remote view, changing the surface the view is on, toggling entity info and opening read-only windows such as production statistics (decision 38). Watching never changes the world (a live test checks the world hash with and without a camera).
+The daemon can keep two graphical spectator clients connected, and other machines can join with `fac watch`. The mod turns every player into a bodiless spectator, and puts it in the `factobot-spectators` permission group, which denies every input action except moving the view, remote view, changing the surface the view is on, toggling entity info and opening read-only windows such as production statistics (decision 38). Watching never changes the world.
 
 - `--camera` renders on a private Xvfb display with Mesa llvmpipe, no GPU needed. `fac dev screenshot` and `World.screenshot` use it to write a PNG of any area, with alt mode and the warning icons a player sees (the camera runs with icon blinking off, so every shot has them). Read the PNG to check that a build looks the way the code says it does. The agent's own `fac screenshot` uses it too: what the agent's screen shows, centred on its body (decision 67). A playtest started with `--camera` gives its agent that command; the sandboxed `fac` writes the PNG into the agent's working directory, `/home/agent/work`, and prints the whole result with `path` in place of the image data, so each preset gets a file-reading tool that shows images besides its shell: Claude Code's `Read` and omp's `read`. A custom harness needs one of its own. Only `mise run rocket` turns the camera on (decision 77); without one, `fac screenshot` fails as `unavailable`.
 - `--viewer` opens a normal window on the current display. A missing or unusable `DISPLAY` fails before Factorio starts. `mise run dev` (from a terminal on the desktop) starts a persistent world with a viewer and a camera; pan with WASD, zoom with the mouse wheel. Viewers reconnect after `fac dev reload`.

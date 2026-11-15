@@ -86,5 +86,6 @@ Times are UTC, `YYYY-MM-DDTHH:MM:SS.ffffffZ`. `started_at` is taken when the run
 | `world/daemon.log` | The daemon's log. |
 | `world/server.log` | The Factorio server's log. |
 | `world/write-data/saves/autosave-1.zip` | Autosaves when `--autosave-minutes` is set, with `autosave-2.zip` and `autosave-3.zip`, rotated in turn. `autosaves` in the summary lists the ones still on disk. |
-| `timelapse/frame-NNNNNN.png` | Timelapse frames when `--timelapse` is set, numbered from 1 (decision 89). |
+| `timelapse/frame-NNNNNN.png` | Timelapse frames, numbered from 1, when `--timelapse` is set or `python -m factobot.timelapse capture RUN_DIR` ran on the live world (decision 89). `config.timelapse` is set only for `--timelapse`. |
 | `timelapse/frames.jsonl` | One line per frame: `frame`, `file`, `tick`, `time` (UTC), `box` (left, top, right, bottom in tiles), `zoom`, `counts` (buildings by type, and pumpjacks, refineries and chemical plants by name), `automated` (pack name to the tick labs first researched with a machine-made one), `made_by_machine` (pack name to count) and `rocket_launched_tick`. |
+| `notes.md` | The agent's `notes.md`, copied at each autosave and when the run ends (decision 85). Absent when the agent wrote none. |

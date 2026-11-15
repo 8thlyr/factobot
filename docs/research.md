@@ -1,5 +1,7 @@
 # Factobot research notes
 
+Feasibility notes from 2026-11-01, kept as written. `docs/decisions.md` settles the open decisions, the architecture and the plan below; read it for what factobot does.
+
 Goal: a benchmark where agents play Factorio through a CLI: see the screen, menus, inventory and game state, and move, place, build, plan (blueprints) and delete.
 
 Sources: a code read of FLE (`reference/fle/`, gitignored), live web and GitHub reads, and JC's research pass dated 2026-11-01. Items marked UNVERIFIED were not checked against a primary source.

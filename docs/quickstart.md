@@ -90,9 +90,9 @@ For red science, take the ticks from the summary:
 stage_ticks = milestone_tick - start_tick
 ```
 
-The reference is 5 hours. At 60 ticks a second that is 1,080,000 ticks. If `stage_ticks` is within twice that (2,160,000 ticks, 10 hours), the score is `1080000 / stage_ticks`. Above 1.00 is faster than the reference. If the milestone is missing, or later than that cap, the score is 0.25. The runner records the ticks, and `mise run report` applies the ratio to every run under `target/playtests` (`docs/development.md`, Leaderboard). `--timeout` is a wall-clock limit on the agent. At game speed 1, 36000 seconds is the same 10 hour budget. The score still uses ticks.
+The reference is 5 hours. At 60 ticks a second that is 1,080,000 ticks. If `stage_ticks` is within twice that (2,160,000 ticks, 10 hours), the score is `1080000 / stage_ticks`. Above 1.00 is faster than the reference. A timeout with no milestone, or a milestone later than that cap, scores 0.25. A run that was stopped, or whose agent quit first, is not scored. The runner records the ticks, and `mise run report` applies the ratio to every run under `target/playtests` (`docs/development.md`, Leaderboard). `--timeout` is a wall-clock limit on the agent. At game speed 1, 36000 seconds is the same 10 hour budget. The score still uses ticks.
 
-`packs` is how you see why a milestone did or did not fire. `made_by_machine` for `automation-science-pack` counts only after you subtract what the agent crafted by hand. `milestone_tick` is the tick labs had used more packs than were ever hand-crafted.
+`packs` is how you see why a milestone did or did not fire. `made_by_machine` for `automation-science-pack` already leaves out what the agent crafted by hand (`made_by_hand`). `milestone_tick` is the tick labs had used more packs than were ever hand-crafted.
 
 ## A model instead of the script
 
@@ -111,7 +111,7 @@ mise run playtest -- playtests/smoke.md --env MY_API_KEY -- \
   my-agent --print {prompt}
 ```
 
-omp is the other built-in preset (`--agent omp`). It needs `OMP_AUTH_BROKER_URL` in the environment, a token file at `~/.omp/auth-broker.token`, and `/usr/bin/nft` (nftables). Name the model in full (`claude-opus-5-5`). A short name is matched fuzzily and can pick a different model. Its `turns` and `cost_usd` stay null. `final_answer` is its last assistant message.
+omp is the other built-in preset (`--agent omp`). It needs `OMP_AUTH_BROKER_URL` in the environment, a token file at `~/.omp/auth-broker.token`, and `/usr/bin/nft` (nftables). Name the model in full (`claude-opus-5-5`). A short name is matched fuzzily and can pick a different model. Its `turns` and `cost_usd` stay null. `final_answer` is its last assistant message. This repo does not set up the broker. Without one, use Claude Code or a command after `--`.
 
 Other tasks in `playtests/` use the same command with a different file: `gather-and-craft.md`, `build-a-smelter.md`, `power-and-research.md`. A `.lua` file next to a task, if one exists, runs in the world before the agent starts.
 
@@ -177,6 +177,8 @@ mise run playtest -- playtests/rocket.md --model opus \
 The game port listens on localhost unless you pass `--listen ADDRESS` on the playtest command. The runner then prints `watch with: fac watch ADDRESS:PORT` on stderr. Anyone who can reach that address can watch the map, so use a private network.
 
 On a machine with a display:
+
+Watching runs the graphical client, so fetch it first as for the camera: `mise run fetch-factorio -- --client` (needs `FACTORIO_USERNAME` and `FACTORIO_TOKEN`).
 
 ```bash
 HOST=ADDRESS:PORT mise run watch
