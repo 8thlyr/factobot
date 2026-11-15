@@ -10,6 +10,7 @@
 
 local agent = require("agent")
 local milestones = require("milestones")
+local launch_clip = require("launch_clip")
 
 local methods = {}
 for name, method in pairs(agent.methods) do
@@ -179,9 +180,11 @@ end)
 script.on_event(defines.events.on_tick, function(event)
   milestones.on_tick(event)
   agent.on_tick()
+  launch_clip.on_tick(event)
 end)
 script.on_event(defines.events.on_script_path_request_finished, agent.on_path)
 script.on_event(defines.events.on_rocket_launched, milestones.on_rocket_launched)
+script.on_event(defines.events.on_rocket_launch_ordered, launch_clip.on_launch_ordered)
 
 -- Science and rocket milestones for the harness (dev socket only).
 methods.milestones = milestones.report

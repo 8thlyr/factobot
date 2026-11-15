@@ -4,23 +4,30 @@ and captions name what happened during the run, at the tick it happened."""
 
 from __future__ import annotations
 
+import time
 from itertools import pairwise
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
+from factobot.client import Client
 from factobot.timelapse import (
     CAMERA_PAN,
     CAMERA_ZOOM,
     CAPTION_SECONDS,
     LANDSCAPE,
+    LAUNCH_EVERY,
+    LAUNCH_FLYING_EVERY,
     MIN_CAPTION_SECONDS,
     Box,
+    Capture,
     Placed,
     camera_targets,
     caption_times,
     core_box,
     frame_durations,
+    launch_timeline,
     milestone_events,
     next_frame,
     smooth_camera,
@@ -162,3 +169,63 @@ def test_a_run_from_a_save_gets_no_caption_for_what_it_already_had() -> None:
         ),
     ]
     assert [event.title for event in milestone_events(frames)] == ["Oil pumping"]
+
+
+def test_the_launch_clip_hurries_the_wait_and_plays_every_shot_of_the_flight() -> None:
+    # The mod's cadence: the order at tick 1000, lift-off 822 ticks later, and
+    # the rocket out of the picture (its middle at y -113.5) 200 ticks after that.
+    box = [-145.5, -147.25, -25.5, -79.75]
+    shots = [
+        {"tick": tick, "box": box, "silo": [-85.5, -99.5], "rocket_y": -99.5}
+        for tick in range(1000, 1822, LAUNCH_EVERY)
+    ]
+    shots += [
+        {"tick": tick, "box": box, "silo": [-85.5, -99.5], "rocket_y": -99.5 - (tick - 1822) / 4}
+        for tick in range(1824, 2024, LAUNCH_FLYING_EVERY)
+    ]
+    lift = next(i for i, shot in enumerate(shots) if shot["rocket_y"] < -99.5)
+
+    shown, outcome_at = launch_timeline(shots, LANDSCAPE)
+
+    fps = LANDSCAPE.fps
+    wait = shown.index(lift)
+    assert wait == pytest.approx(824 / (LANDSCAPE.launch_speed * 60) * fps, abs=1)
+    # In flight every shot is shown once, in order: the rocket never jumps.
+    flight = shown[wait : shown.index(len(shots) - 1) + 1]
+    assert flight == list(range(lift, len(shots)))
+    # Then the last shot holds, with the outcome up once the rocket is above the middle.
+    assert shown.count(len(shots) - 1) == round(LANDSCAPE.launch_hold * fps)
+    assert shots[shown[round(outcome_at * fps)]]["rocket_y"] <= -113.5
+    assert outcome_at < (len(shown) - fps) / fps
+
+
+class _Dev:
+    """A dev socket that answers the launch clip's read with `clip`, or raises."""
+
+    def __init__(self, clip: dict[str, Any] | None) -> None:
+        self.clip = clip
+
+    def call(self, method: str, params: dict[str, Any]) -> Any:
+        if self.clip is None:
+            raise OSError("the daemon is gone")
+        return self.clip
+
+
+def test_a_launch_clip_that_fails_never_fails_or_holds_up_the_run(tmp_path: Path) -> None:
+    gone = Capture(cast(Client, _Dev(None)), tmp_path, 30.0)
+    assert gone.finish_launch(wait=5.0) == 0
+
+    # The camera never writes the one shot the mod asked for.
+    clip = {
+        "done": True,
+        "center": {"x": 0.0, "y": -14.0},
+        "silo": {"x": 0.0, "y": 0.0},
+        "zoom": 0.5,
+        "width": 1920,
+        "height": 1080,
+        "shots": [{"tick": 10}],
+    }
+    stuck = Capture(cast(Client, _Dev(clip)), tmp_path, 30.0)
+    started = time.monotonic()
+    assert stuck.finish_launch(wait=0.5) == 0
+    assert time.monotonic() - started < 2.0

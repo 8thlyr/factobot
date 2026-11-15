@@ -11,10 +11,12 @@ turns into captions.
     python -m factobot.timelapse capture RUN_DIR [--every 30]   # attach to a running world
     python -m factobot.timelapse render RUN_DIR -o out.mp4      # make the video
 
-A playtest started with `--timelapse SECONDS` captures as it runs. The video
+A playtest started with `--timelapse SECONDS` captures as it runs, and also
+films the first rocket launch into `timelapse/launch/` (decision 95). The video
 has its own camera: it crops and enlarges the frames to follow the factory the
 agent built (from the run's `world/calls.jsonl`), eases between aims so it never
-jumps, and gives each frame time by how much the factory grew in it (decision 90).
+jumps, and gives each frame time by how much the factory grew in it (decision
+90). It ends on the launch clip when the run has one.
 """
 
 from __future__ import annotations
@@ -29,8 +31,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from bisect import bisect_right
 from collections import deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -101,6 +104,58 @@ FRAME_LUA = (
     "return {tick = game.tick, chunks = chunks, counts = counts, "
     "body = body and {body.position.x, body.position.y} or {0, 0}}"
 )
+
+# The launch clip (decision 95). The 30 s frames never catch the rocket in
+# flight: it stands in the silo about 14 s after the launch order, is out of
+# sight by 17 s, and the game counts the launch at about 19 s. Once armed, the
+# mod (launch_clip.lua) has the camera render the silo on its own ticks from
+# the launch order until the rocket has left the picture; the runner then moves
+# the shots to `timelapse/launch/` with their own `frames.jsonl`.
+LAUNCH_DIR = "launch"
+CAMERA_PLAYER = "factobot-camera"
+# Where the mod writes the shots, under the camera client's script-output.
+LAUNCH_SHOTS = "factobot/launch/"
+# Zoom 0.5 on 1920x1080 shows 120 x 67.5 tiles; the silo sits 14 tiles below
+# the centre, so the rocket stays in sight for its first 50 tiles of climb.
+LAUNCH_ZOOM = 0.5
+LAUNCH_LIFT = 14.0
+# Ticks between shots while the rocket stands in the silo (7.5 a game second,
+# one a video frame at the landscape cut's 4 times speed), and once it rises
+# (30 a second, one a video frame at real speed). On the 2.5 million tick
+# factory of a finished run the camera wrote 8 to 9 JPEGs a second, so it falls
+# up to about 10 s behind and catches up after the rocket has gone; the game
+# does not wait for it.
+LAUNCH_EVERY = 8
+LAUNCH_FLYING_EVERY = 2
+# Ticks after the order when the mod stops filming whatever happens: the
+# rocket is out of the picture by about 1030.
+LAUNCH_LIMIT = 1500
+# JPEG quality of the shots: a JPEG is a quarter of the PNG's size and the
+# camera writes it faster.
+LAUNCH_QUALITY = 90
+# Seconds of wall time the runner waits, after the run ends, for the camera to
+# write the shots, before it stops the world anyway.
+LAUNCH_WAIT = 120.0
+LAUNCH_ARM_LUA = (
+    "storage.launch_clip = {"
+    f'player = "{CAMERA_PLAYER}", path = "{LAUNCH_SHOTS}", '
+    f"width = {FRAME_SIZE[0]}, height = {FRAME_SIZE[1]}, zoom = {LAUNCH_ZOOM}, "
+    f"lift = {LAUNCH_LIFT}, every = {LAUNCH_EVERY}, flying_every = {LAUNCH_FLYING_EVERY}, "
+    f"limit = {LAUNCH_LIMIT}, quality = {LAUNCH_QUALITY}, shots = {{}}}}"
+)
+# Autosaves of a run with --timelapse are armed too, so a run from a save
+# without it disarms.
+LAUNCH_DISARM_LUA = "storage.launch_clip = nil"
+# The filming so far, or false before a launch order. Read only.
+LAUNCH_READ_LUA = (
+    "local c = storage.launch_clip "
+    "if not (c and c.started) then return false end "
+    "return {done = c.done == true, error = c.error, center = c.center, "
+    "silo = c.silo_position, zoom = c.zoom, width = c.width, height = c.height, "
+    "shots = c.shots}"
+)
+# The end of a JPEG file.
+_JPEG_END = b"\xff\xd9"
 
 
 @dataclass(frozen=True)
@@ -219,6 +274,9 @@ class Capture:
     `poll` is cheap when no frame is due (one `game.tick` read), so a runner can
     call it every few seconds. A frame that fails is logged and the next poll
     tries again; a timelapse must never end the run it records.
+
+    `arm_launch` has the mod film the next rocket launch, and `finish_launch`
+    collects that clip before the world stops (decision 95).
     """
 
     def __init__(
@@ -234,6 +292,12 @@ class Capture:
         self.every_ticks = max(1, round(every * TICKS_PER_SECOND))
         self.size = size
         self.index_path = self.dir / "frames.jsonl"
+        self.launch_dir = self.dir / LAUNCH_DIR
+        self.shots_dir = (
+            out_dir / "world" / CAMERA_PLAYER / "write-data" / "script-output" / LAUNCH_SHOTS
+        )
+        # Shots of the launch clip moved to `launch_dir` so far.
+        self.launched = 0
         # Continue a capture that was stopped: same frame numbering and framing.
         earlier = read_frames(self.dir)
         self.count = len(earlier)
@@ -296,6 +360,99 @@ class Capture:
         self.box = box
         self.next_tick = int(seen["tick"]) + self.every_ticks
         return record
+
+    def arm_launch(self) -> None:
+        """Have the mod film the next rocket launch. A failure is logged and the
+        run goes on without the clip."""
+        try:
+            # Shots an earlier world in this run directory left must not pass for new ones.
+            shutil.rmtree(self.shots_dir, ignore_errors=True)
+            self.dev.call("lua", {"code": LAUNCH_ARM_LUA})
+        except (OSError, FactobotError) as err:
+            print(f"launch clip not armed: {err}", file=sys.stderr, flush=True)
+
+    def finish_launch(
+        self, stop: Callable[[], bool] = lambda: False, wait: float = LAUNCH_WAIT
+    ) -> int:
+        """Wait while the camera writes the launch clip's shots, moving each to
+        `timelapse/launch/` as it lands, until all are there, `wait` seconds have
+        passed or `stop()` says so. Returns how many it moved; none when no launch
+        was ordered. This runs in the last seconds of a run that took hours, so a
+        failure of any kind is logged and ends the wait, keeping the shots moved."""
+        self.launched = 0
+        try:
+            self._collect_launch(time.monotonic() + wait, stop)
+        except Exception as err:
+            print(
+                f"launch clip failed after {self.launched} shots: {type(err).__name__}: {err}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return self.launched
+
+    def _collect_launch(self, deadline: float, stop: Callable[[], bool]) -> None:
+        clip = self.dev.call("lua", {"code": LAUNCH_READ_LUA})
+        if not clip:
+            return
+        shutil.rmtree(self.launch_dir, ignore_errors=True)
+        self.launch_dir.mkdir(parents=True)
+        index = self.launch_dir / "frames.jsonl"
+        x, y = clip["center"]["x"], clip["center"]["y"]
+        half_width = clip["width"] / (2 * TILE_PX * clip["zoom"])
+        half_height = clip["height"] / (2 * TILE_PX * clip["zoom"])
+        box = [x - half_width, y - half_height, x + half_width, y + half_height]
+        silo = [clip["silo"]["x"], clip["silo"]["y"]]
+        while True:
+            # An empty Lua table reads as an empty object.
+            shots = clip["shots"] if isinstance(clip["shots"], list) else []
+            while self.launched < len(shots):
+                number = self.launched + 1
+                source = self.shots_dir / f"shot-{number:05d}.jpg"
+                if not _jpeg_written(source):
+                    break
+                name = f"frame-{number:06d}.jpg"
+                shutil.move(source, self.launch_dir / name)
+                shot = shots[number - 1]
+                record = {
+                    "frame": number,
+                    "file": name,
+                    "tick": shot["tick"],
+                    "box": box,
+                    "zoom": clip["zoom"],
+                    "silo": silo,
+                    "rocket_y": shot.get("rocket_y"),
+                }
+                with index.open("a") as out:
+                    out.write(json.dumps(record) + "\n")
+                self.launched = number
+            if clip["done"] and self.launched == len(shots):
+                break
+            if time.monotonic() >= deadline or stop():
+                print(
+                    "stopped waiting for the camera to write the launch clip",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                break
+            time.sleep(0.25)
+            clip = self.dev.call("lua", {"code": LAUNCH_READ_LUA})
+        if clip.get("error"):
+            print(f"the mod stopped filming the launch: {clip['error']}", file=sys.stderr)
+        print(
+            f"launch clip: {self.launched} of {len(shots)} shots in {self.launch_dir}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _jpeg_written(path: Path) -> bool:
+    """Whether the camera has finished writing the JPEG at `path`."""
+    try:
+        with path.open("rb") as jpeg:
+            jpeg.seek(-len(_JPEG_END), os.SEEK_END)
+            return jpeg.read() == _JPEG_END
+    except OSError:
+        return False
 
 
 def read_frames(directory: Path) -> list[dict[str, Any]]:
@@ -400,8 +557,8 @@ def milestone_events(frames: Sequence[dict[str, Any]]) -> list[Event]:
 @dataclass(frozen=True)
 class Cut:
     """One video made from the frames: its size, where the factory's picture sits
-    in it, and how its time is spent: title card, the frames, the closing push-in
-    and the end card."""
+    in it, and how its time is spent: title card, the frames, the closing push-in,
+    the launch clip when the run has one, and the end card."""
 
     width: int
     height: int
@@ -411,6 +568,15 @@ class Cut:
     outro: float
     # The factory's picture in the video: left, top, width and height in pixels.
     picture: tuple[int, int, int, int]
+    # With a launch clip (decision 95): the push-in's shorter length, since it
+    # only leads into the clip; how many times real speed the clip plays the
+    # wait before lift-off at (the flight plays in real time); and the seconds
+    # it holds its last shot after the rocket has gone.
+    launch_finale: float = 3.0
+    launch_speed: float = 4.0
+    launch_hold: float = 2.5
+    # Seconds the launch clip takes in this video; 0 without one.
+    launch: float = 0.0
     fps: int = 30
 
     @property
@@ -424,13 +590,24 @@ class Cut:
     @property
     def body(self) -> float:
         """Seconds the frames get."""
-        return self.seconds - self.intro - self.finale - self.outro
+        return self.seconds - self.intro - self.finale - self.launch - self.outro
 
 
 LANDSCAPE = Cut(1920, 1080, 70.0, intro=3.5, finale=6.5, outro=4.0, picture=(0, 0, 1920, 1080))
 # A square picture between the headline above and the clock and counts below,
 # with captions over its foot, all big enough to read on a phone.
-VERTICAL = Cut(1080, 1920, 23.0, intro=2.0, finale=4.5, outro=2.5, picture=(0, 400, 1080, 1080))
+VERTICAL = Cut(
+    1080,
+    1920,
+    23.0,
+    intro=2.0,
+    finale=4.5,
+    outro=2.5,
+    picture=(0, 400, 1080, 1080),
+    launch_finale=2.5,
+    launch_speed=6.0,
+    launch_hold=2.0,
+)
 BACKGROUND = (14, 14, 16)
 # Seconds a milestone caption stays up, and the least it stays when the next
 # one is due sooner.
@@ -867,16 +1044,18 @@ def finale_shots(
     focus: tuple[float, float],
     still: tuple[Path, Box] | None,
     cut: Cut,
+    end_tiles: float = FINALE_TILES,
 ) -> list[Shot]:
     """A slow push-in on `focus` (the rocket silo) from where the frames end.
 
     With `still`, a sharper picture of the map area its box covers, the camera
     first moves to the largest view that both pictures cover, dissolves into the
-    still there, then pushes in on it. Without one it pushes in on the last frame
-    as far as MAX_ZOOM allows (`least` tiles across)."""
+    still there, then pushes in on it until it is `end_tiles` tall. Without one
+    it pushes in on the last frame as far as MAX_ZOOM allows (`least` tiles
+    across)."""
     count = round(cut.finale * cut.fps)
     aspect = cut.aspect
-    end_width = FINALE_TILES * aspect
+    end_width = end_tiles * aspect
     if still is None:
         end = _inside(_at(focus, max(end_width, least), aspect), last_area)
         return [
@@ -902,6 +1081,52 @@ def finale_shots(
             push = _between(meet, end, _ease((u - FINALE_PUSH) / (1 - FINALE_PUSH)))
             shots.append(_still(still_path, still_area, push))
     return shots
+
+
+def launch_camera(area: Box, cut: Cut) -> Box:
+    """The picture's map area during the launch clip: all of the shots' `area`
+    that fits the picture's shape, about its centre."""
+    return _inside(_at(area.center, min(area.width, area.height * cut.aspect), cut.aspect), area)
+
+
+def launch_timeline(shots: Sequence[dict[str, Any]], cut: Cut) -> tuple[list[int], float]:
+    """For each video frame of the launch clip, the shot it shows; and the video
+    time, from the clip's start, the rocket passes the middle of the picture,
+    when the outcome comes up below it.
+
+    The wait from the launch order to lift-off plays at `cut.launch_speed`
+    times real speed and the flight in real time; the last shot then holds for
+    `cut.launch_hold`."""
+    ticks = [shot["tick"] for shot in shots]
+    first, last = ticks[0], ticks[-1]
+    silo_y = shots[0]["silo"][1]
+    middle = Box(*shots[0]["box"]).center[1]
+
+    def first_above(y: float) -> int:
+        return next(
+            (
+                shot["tick"]
+                for shot in shots
+                if shot.get("rocket_y") is not None and shot["rocket_y"] < y
+            ),
+            last,
+        )
+
+    lift = first_above(silo_y)
+    speed = cut.launch_speed * TICKS_PER_SECOND
+    wait = (lift - first) / speed
+
+    def tick_at(seconds: float) -> float:
+        if seconds < wait:
+            return first + seconds * speed
+        return min(last, lift + (seconds - wait) * TICKS_PER_SECOND)
+
+    count = round((wait + (last - lift) / TICKS_PER_SECOND + cut.launch_hold) * cut.fps)
+    # The latest shot taken by then; the small margin keeps float error from
+    # showing the one before a shot due on that exact tick.
+    shown = [max(0, bisect_right(ticks, tick_at(n / cut.fps) + 1e-6) - 1) for n in range(count)]
+    passed = first_above(middle)
+    return shown, wait + (passed - lift) / TICKS_PER_SECOND
 
 
 def caption_times(wanted: Sequence[float], end: float) -> list[tuple[float, float] | None]:
@@ -984,14 +1209,14 @@ def overlay_ass(
     subline: str,
     band: str,
     outcome: str,
+    outcome_at: float,
 ) -> str:
     """The video's text as an ASS subtitle script: title card, clock, building
-    counts, milestone captions, the outcome over the push-in and the end card.
-    `starts` is the video time each frame comes on; `band` is the line under the
-    vertical cut's headline."""
+    counts, milestone captions, the outcome from `outcome_at` until the end
+    card, and the end card. `starts` is the video time each frame comes on;
+    `band` is the line under the vertical cut's headline."""
     end = cut.seconds
     body_end = cut.intro + cut.body
-    finale_end = body_end + cut.finale
     dim = (
         f"{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H40&\\p1}}"
         f"m 0 0 l {cut.width} 0 {cut.width} {cut.height} 0 {cut.height}{{\\p0}}"
@@ -1067,17 +1292,12 @@ def overlay_ass(
             f"{{\\fad(200,350)}}{event.title}\\N{{\\fs{small + 6}\\b0}}"
             f"after {_clock(event.tick / TICKS_PER_SECOND)} of game time",
         )
-    # The outcome over the push-in, once the camera has closed in.
+    # The outcome over the push-in once the camera has closed in, or over the
+    # launch clip once the rocket is above it.
     said, _, rest = outcome.partition(" after ")
     if rest:
         outcome = f"{said}\\N{{\\fs{small + 6}\\b0}}after {rest}"
-    add(
-        3,
-        body_end + cut.finale * FINALE_MEET,
-        finale_end,
-        "Caption",
-        f"{{\\fad(500,300)}}{outcome}",
-    )
+    add(3, outcome_at, end - cut.outro, "Caption", f"{{\\fad(500,300)}}{outcome}")
     header = (
         f"[Script Info]\nScriptType: v4.00+\nPlayResX: {cut.width}\nPlayResY: {cut.height}\n"
         "WrapStyle: 0\nScaledBorderAndShadow: yes\n\n"
@@ -1192,17 +1412,36 @@ def render(
     out: Path,
     cut: Cut,
     *,
+    seconds: float | None = None,
     title: str | None = None,
     end_still: tuple[Path, Box] | None = None,
     ffmpeg: str = "ffmpeg",
 ) -> Path:
     """Make the video of the frames captured in `run_dir` and write it to `out`.
-    `end_still` is a sharper picture of the map area its box covers, for the
-    closing push-in."""
+
+    `seconds` is its length; by default the cut's, plus what the launch clip
+    adds when the run has one (decision 95). `end_still` is a sharper picture of
+    the map area its box covers, for the closing push-in of a run without one."""
     directory = run_dir / "timelapse"
     frames = read_frames(directory)
     if len(frames) < 2:
         raise SystemExit(f"{directory} has {len(frames)} frames; a video needs 2 or more")
+    launch = read_frames(directory / LAUNCH_DIR)
+    clip: list[int] = []
+    outcome_in_clip = 0.0
+    if len(launch) >= 2:
+        clip, outcome_in_clip = launch_timeline(launch, cut)
+        clip_seconds = len(clip) / cut.fps
+        if seconds is None:
+            seconds = cut.seconds - cut.finale + cut.launch_finale + clip_seconds
+        cut = replace(cut, finale=cut.launch_finale, launch=clip_seconds)
+        if end_still is not None:
+            print("the run has a launch clip; --end-still is not used", file=sys.stderr)
+            end_still = None
+    if seconds is not None:
+        cut = replace(cut, seconds=seconds)
+    if cut.body < CAPTION_SECONDS:
+        raise SystemExit(f"{cut.seconds:g} s leaves the frames {cut.body:.1f} s; give more")
     summary_path = run_dir / "summary.json"
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
     # A run that stops at the launch stops its world before the next frame, so
@@ -1212,7 +1451,7 @@ def render(
         frames = [*frames[:-1], {**frames[-1], "rocket_launched_tick": launched}]
     events = milestone_events(frames)
     outcome = outcome_line(frames, events)
-    # The launch closes the video over the push-in, not as a caption.
+    # The launch closes the video over the push-in or the clip, not as a caption.
     events = [event for event in events if event.title != "Rocket launched"]
     if title is None:
         model = summary.get("model")
@@ -1231,9 +1470,29 @@ def render(
     )
     body = [Shot(layers, camera) for (layers, _, _), camera in zip(shown, cameras, strict=True)]
     opening = _still(files[0], areas[0], cameras[0])
-    focus = _silo(placements) or body[-1].camera.center
     least = _least(frames[-1], cut)
-    finale = finale_shots(files[-1], areas[-1], least, body[-1].camera, focus, end_still, cut)
+    body_end = cut.intro + cut.body
+    if clip:
+        # Push in to the clip's view and dissolve into its first shot.
+        clip_files = [directory / LAUNCH_DIR / record["file"] for record in launch]
+        clip_area = Box(*launch[0]["box"])
+        view = launch_camera(clip_area, cut)
+        finale = finale_shots(
+            files[-1],
+            areas[-1],
+            least,
+            body[-1].camera,
+            view.center,
+            (clip_files[0], clip_area),
+            cut,
+            end_tiles=view.height,
+        )
+        finale += [_still(clip_files[index], clip_area, view) for index in clip]
+        outcome_at = body_end + cut.finale + outcome_in_clip
+    else:
+        focus = _silo(placements) or body[-1].camera.center
+        finale = finale_shots(files[-1], areas[-1], least, body[-1].camera, focus, end_still, cut)
+        outcome_at = body_end + cut.finale * FINALE_MEET
     shots = [opening] * round(cut.intro * cut.fps) + body + finale
     shots += [shots[-1]] * (round(cut.seconds * cut.fps) - len(shots))
 
@@ -1250,6 +1509,7 @@ def render(
                 subline=subline,
                 band=band,
                 outcome=outcome,
+                outcome_at=outcome_at,
             )
         )
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1326,7 +1586,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--vertical",
         action="store_true",
         help=f"a {VERTICAL.width}x{VERTICAL.height} cut of {VERTICAL.seconds:.0f} s instead of "
-        f"{LANDSCAPE.width}x{LANDSCAPE.height} of {LANDSCAPE.seconds:.0f} s",
+        f"{LANDSCAPE.width}x{LANDSCAPE.height} of {LANDSCAPE.seconds:.0f} s; a run with a "
+        "launch clip (timelapse/launch/) plays it at the end, which adds about 6 s",
     )
     make.add_argument("--seconds", type=float, help="length of the video")
     make.add_argument("--title", help="the title card's headline [default: from the model]")
@@ -1334,7 +1595,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--end-still",
         type=Path,
         help="a sharper picture to push in on at the end, such as a 4K screenshot of the "
-        "rocket silo from the run's last save; needs --end-still-area",
+        "rocket silo from the run's last save; needs --end-still-area. Not used when the "
+        "run has a launch clip",
     )
     make.add_argument(
         "--end-still-area",
@@ -1351,7 +1613,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             shortest = cut.intro + cut.finale + cut.outro + CAPTION_SECONDS
             if args.seconds <= shortest:
                 parser.error(f"--seconds must be more than {shortest:g}")
-            cut = replace(cut, seconds=args.seconds)
         if (args.end_still is None) != (args.end_still_area is None):
             parser.error("--end-still and --end-still-area go together")
         if shutil.which("ffmpeg") is None:
@@ -1362,7 +1623,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             with Image.open(args.end_still) as picture:
                 aspect = picture.width / picture.height
             still = (args.end_still, _at((x, y), across, aspect))
-        print(render(args.run_dir, args.out, cut, title=args.title, end_still=still))
+        print(
+            render(
+                args.run_dir, args.out, cut, seconds=args.seconds, title=args.title, end_still=still
+            )
+        )
     return 0
 
 
