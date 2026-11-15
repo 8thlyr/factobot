@@ -5,7 +5,7 @@ description = "Python client and Inspect AI tasks for the factobot Factorio agen
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.12"
-dependencies = ["inspect-ai>=0.3.287"]
+dependencies = ["inspect-ai>=0.3.287", "pillow>=13"]
 
 [project.entry-points.inspect_ai]
 factobot = "factobot._registry"
