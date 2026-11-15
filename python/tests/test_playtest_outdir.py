@@ -1,6 +1,5 @@
-"""Refuse a run directory that already holds a world, still run one that holds
-only an old transcript, and pick two different default directories in the same
-second."""
+"""Refuse a run directory that already holds a world, and start a run without
+--save on a new map."""
 
 from __future__ import annotations
 
@@ -75,3 +74,36 @@ def test_a_run_directory_that_holds_a_world_is_refused(
         f"{out} holds an earlier run's world. Continue it with --save {save} --out <new directory>"
     )
     assert _files(out) == before
+
+
+def test_a_run_without_save_boots_a_new_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The refusal's own path once shadowed the `save` argument, so every run
+    # without --save asked the daemon to copy a world/save.zip that was not there.
+    started: dict[str, Any] = {}
+
+    class Booted(Exception):
+        pass
+
+    def start_world(**kwargs: Any) -> None:
+        started.update(kwargs)
+        raise Booted
+
+    fac = tmp_path / "fac-agent"
+    fac.write_bytes(b"")
+    monkeypatch.setattr(playtest, "start_world", start_world)
+    monkeypatch.setattr(playtest, "find_agent_fac", lambda: fac)
+
+    with pytest.raises(Booted):
+        playtest.run_playtest(
+            "task",
+            tmp_path / "out",
+            command=["/bin/true", "{prompt}"],
+            seed=7,
+            camera=False,
+            timeout=5,
+        )
+
+    assert started["save"] is None
+    assert started["seed"] == 7

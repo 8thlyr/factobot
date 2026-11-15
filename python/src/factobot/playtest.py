@@ -517,11 +517,11 @@ def run_playtest(
     # play the earlier world while the summary recorded this run's seed.
     # Continue from that save in a new directory.
     world_dir = out_dir / "world"
-    save = world_dir / "save.zip"
-    if save.is_file() or (world_dir / "calls.jsonl").is_file():
+    earlier_save = world_dir / "save.zip"
+    if earlier_save.is_file() or (world_dir / "calls.jsonl").is_file():
         raise SystemExit(
             f"{out_dir} holds an earlier run's world. "
-            f"Continue it with --save {save} --out <new directory>"
+            f"Continue it with --save {earlier_save} --out <new directory>"
         )
     if not Path(sandbox.BWRAP).exists():
         raise SystemExit(f"playtests run agents in bubblewrap; install it ({sandbox.BWRAP})")
