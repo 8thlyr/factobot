@@ -19,7 +19,7 @@ Start at the machine that should make the thing that is missing and walk upstrea
 | Status | Look |
 |---|---|
 | `item_ingredient_shortage`, `fluid_ingredient_shortage`, `no_ingredients` | upstream: `missing` names what is short; follow that item back |
-| `missing_science_packs` | upstream: a lab shows no `missing`. The pack that is short is the one in `cost.packs` of `fac research TECH --show` that the lab's `lab_input` does not hold; follow that pack back |
+| `missing_science_packs` | upstream: a lab shows no `missing`. `fac research` names the pack the labs lack in `short_of`; follow that pack back |
 | `full_output`, `waiting_for_space_in_destination` | downstream: what should take the output is not taking |
 | `no_power`, `low_power` | the generators: fuel, water, too few boilers |
 | `not_plugged_in_electric_network` | the poles: none reaches the machine, or the chain to the generators is broken |
@@ -59,7 +59,7 @@ Start at the machine that should make the thing that is missing and walk upstrea
 | A machine got the wrong fluid | a port in `fac inspect` has `problem`, or a pipe's `fluids` shows another fluid than you laid | Two fluid lines are joined. The game refuses most placements that would mix two fluids, but a pipe can still meet a machine port of another fluid: the machine then starves. Keep one empty tile, or a pipe-to-ground, between different fluids, and read `ports` (oil.md, "What wrong piping looks like"). |
 | Something stopped after you changed a recipe elsewhere | the stalled machine is `missing` what the changed machine used to make | You switched off its only source (sulfur, lubricant, petroleum). Before any recipe change, list what uses the old product; switch back, or build a second machine for the new product. |
 | Lab idle | `no_research_in_progress` or `missing_science_packs` | Queue research (`fac research`), or feed packs. Each lab needs every pack type the current technology uses; in a lab chain, packs enter at the first lab and pass down the chain, so a pack fed into the middle never reaches the labs before it. |
-| Research progress hasn't moved between two checks | `fac research` shows the same `progress`; the HUD says so after 2 minutes | Labs are starved: `fac inspect` the first lab and compare its `lab_input` with `cost.packs` of `fac research TECH --show` (a lab shows `missing_science_packs` and no `missing`); `fac stats` the pack that is not there, then the stall protocol from its assembler. Or power is `low_power`. |
+| Research hasn't moved between two checks, or the HUD time plus `minutes_left` lands past the phase's By | `fac research` shows the same `progress`, or a `minutes_left` larger than the time to By; the HUD says so after 2 minutes, and when half the labs or more wait with 30 minutes or more left | Labs are starved: `short_of` names the pack. `fac stats` it, then the stall protocol from its assembler; if its line runs and is too small, build its next block. Or power is `low_power`. |
 | Research slower than the science assemblers make packs | every lab `working`; pack assemblers `full_output` | Too few labs, not too few packs: 0.3 packs/s on a 30 s technology needs 9 labs at speed 1 (research.md). |
 | Items stop at an underground belt | both pieces are entrances | Place the exit with `--belt-type output`. |
 | `take` fails or takes less than you asked | `your inventory is full`; the HUD shows few `free_slots` | Empty what you don't need into a chest. A script that hid this error left 510 purple packs lying in a chest for 2 hours in a test run. |

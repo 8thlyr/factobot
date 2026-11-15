@@ -3265,6 +3265,121 @@ end
 -- local limit.
 local research
 do
+  -- Research pace (decision 93). Every 10 s of game time the mod notes the
+  -- current technology's progress and the labs that wait for a science pack,
+  -- and keeps the notes of the last 5 minutes for that technology. Reading
+  -- labs and progress changes nothing in the world. `M.watch_research` and
+  -- `M.research_pace` are on M because the HUD and `on_tick` use them and the
+  -- chunk has no room for another local.
+  local PACE_SAMPLE_TICKS = 600
+  local PACE_WINDOW_TICKS = 5 * 3600
+  local LAB_WAIT_TICKS = 3600 -- waiting labs are averaged over the last minute
+
+  -- The force's labs, how many show `missing_science_packs`, and how many of
+  -- those lack each pack of the current technology.
+  local function lab_snapshot(surface, force, current)
+    local labs = surface.find_entities_filtered({ type = "lab", force = force })
+    local waiting, short = 0, {}
+    for _, lab in ipairs(labs) do
+      if lab.status == defines.entity_status.missing_science_packs then
+        waiting = waiting + 1
+        local input = lab.get_inventory(defines.inventory.lab_input)
+        for _, ingredient in pairs(current.research_unit_ingredients) do
+          if not input or input.get_item_count(ingredient.name) == 0 then
+            short[ingredient.name] = (short[ingredient.name] or 0) + 1
+          end
+        end
+      end
+    end
+    return #labs, waiting, short
+  end
+
+  -- Called every second: remember the tick research last moved (a new
+  -- technology or more progress), and every PACE_SAMPLE_TICKS note the pace.
+  function M.watch_research(s, character)
+    local force = character.force
+    local current = force.current_research
+    local name = current and current.name or nil
+    local progress = current and force.research_progress or 0
+    local tick = game.tick
+    local seen = s.research_seen
+    if not seen or seen.name ~= name or seen.progress ~= progress then
+      s.research_seen = { name = name, progress = progress, tick = tick }
+    end
+    if tick % PACE_SAMPLE_TICKS ~= 0 then
+      return
+    end
+    if not current then
+      s.research_samples = nil
+      return
+    end
+    local kept = {}
+    for _, sample in ipairs(s.research_samples or {}) do
+      if sample.name == name and tick - sample.tick <= PACE_WINDOW_TICKS then
+        kept[#kept + 1] = sample
+      end
+    end
+    local labs, waiting, short = lab_snapshot(character.surface, force, current)
+    kept[#kept + 1] = {
+      tick = tick,
+      name = name,
+      progress = progress,
+      labs = labs,
+      waiting = waiting,
+      short = short,
+    }
+    s.research_samples = kept
+  end
+
+  -- The pace of the current technology from the notes, or nil before the
+  -- first note: `minutes_left` at the rate of the last 5 minutes (left out
+  -- until it has a minute of notes and has moved), the `labs`, the labs
+  -- waiting for a pack on average over the last minute, and `short_of`, the
+  -- packs they lack, the most lacked first.
+  function M.research_pace(force)
+    local current = force.current_research
+    local samples = storage.agent and storage.agent.research_samples
+    local last = samples and samples[#samples]
+    if not (current and last and last.name == current.name) then
+      return nil
+    end
+    local pace = { labs = last.labs }
+    local first = samples[1]
+    local progress = force.research_progress
+    local elapsed = game.tick - first.tick
+    if elapsed >= 3600 and progress > first.progress then
+      local per_tick = (progress - first.progress) / elapsed
+      pace.minutes_left = math.max(1, math.floor((1 - progress) / per_tick / 3600 + 0.5))
+    end
+    local count, waiting, short = 0, 0, {}
+    for i = #samples, 1, -1 do
+      local sample = samples[i]
+      if last.tick - sample.tick >= LAB_WAIT_TICKS then
+        break
+      end
+      count = count + 1
+      waiting = waiting + sample.waiting
+      for pack, labs in pairs(sample.short) do
+        short[pack] = (short[pack] or 0) + labs
+      end
+    end
+    pace.labs_waiting = math.floor(waiting / count + 0.5)
+    local packs = {}
+    for pack in pairs(short) do
+      packs[#packs + 1] = pack
+    end
+    table.sort(packs, function(a, b)
+      if short[a] ~= short[b] then
+        return short[a] > short[b]
+      end
+      return a < b
+    end)
+    if pace.labs_waiting > 0 and #packs > 0 then
+      pace.short_of = packs
+    end
+    return pace
+  end
+
   local function queued_names(force)
     local queued = {}
     for _, tech in pairs(force.research_queue or {}) do
@@ -3334,11 +3449,18 @@ do
       queue[#queue + 1] = tech.name
     end
     local current = force.current_research
-    return {
-      current = current and { name = current.name, progress = round(force.research_progress) }
-        or nil,
-      queue = queue,
-    }
+    local view = nil
+    if current then
+      view = { name = current.name, progress = round(force.research_progress) }
+      local pace = M.research_pace(force)
+      if pace then
+        view.minutes_left = pace.minutes_left
+        view.labs = pace.labs
+        view.labs_waiting = pace.labs_waiting
+        view.short_of = pace.short_of
+      end
+    end
+    return { current = view, queue = queue }
   end
 
   -- The queue, what can be researched next, and how many technologies are
@@ -4403,20 +4525,13 @@ end
 
 -- HUD ------------------------------------------------------------------------
 
--- Remember the tick research last moved: a new technology or more progress.
-local function watch_research(s, force)
-  local current = force.current_research
-  local name = current and current.name or nil
-  local progress = current and force.research_progress or 0
-  local seen = s.research_seen
-  if not seen or seen.name ~= name or seen.progress ~= progress then
-    s.research_seen = { name = name, progress = progress, tick = game.tick }
-  end
-end -- The rest of the HUD lives in its own function, whose locals do not count -- against the chunk's limit of 200.
+-- The rest of the HUD lives in its own function, whose locals do not count
+-- against the chunk's limit of 200.
 (function()
   -- How long research may stand still, or the agent stay silent, before the
   -- HUD says so, and how few free inventory slots it warns at.
   local RESEARCH_STALL_TICKS = 2 * 60 * 60
+  local SLOW_MINUTES = 30 -- labs waiting are warned of only with this much research to go
   local REPEAT_TICKS = 20 * 60 -- a warning that still holds is repeated this often
   local SILENCE_TICKS = 3 * 60 * 60
   local FEW_FREE_SLOTS = 8
@@ -4546,16 +4661,50 @@ end -- The rest of the HUD lives in its own function, whose locals do not count 
     local research = "none"
     if current then
       research = string.format("%s %d%%", current.name, math.floor(force.research_progress * 100))
+      -- Labs waiting for a pack name the pack (decision 93). Labs are sized
+      -- above the pack lines, so a few always wait on plan: the warning is
+      -- for half of them or more waiting with SLOW_MINUTES or more to go.
+      local pace = M.research_pace(force)
+      local waiting, slow = nil, nil
+      if pace then
+        if pace.minutes_left then
+          research = string.format("%s, %d min left", research, pace.minutes_left)
+        end
+        if has_lab and pace.short_of then
+          waiting = string.format(
+            "%d of %d labs are waiting for %s",
+            pace.labs_waiting,
+            pace.labs,
+            table.concat(pace.short_of, " and ")
+          )
+          if
+            pace.labs_waiting * 2 >= pace.labs
+            and pace.minutes_left
+            and pace.minutes_left >= SLOW_MINUTES
+          then
+            slow = string.format(
+              "%s, so %s takes %d more minutes: make more of %s",
+              waiting,
+              current.name,
+              pace.minutes_left,
+              #pace.short_of == 1 and "it" or "them"
+            )
+          end
+        end
+      end
       local seen = s.research_seen
       local still = seen and seen.name == current.name and tick - seen.tick or 0
       if has_lab and still >= RESEARCH_STALL_TICKS then
         warnings[#warnings + 1] = {
           "research stalled",
           string.format(
-            "research has not moved for %d minutes: the labs lack science packs or power",
-            math.floor(still / 3600)
+            "research has not moved for %d minutes: %s",
+            math.floor(still / 3600),
+            waiting or "the labs lack science packs or power"
           ),
         }
+      elseif slow then
+        warnings[#warnings + 1] = { "labs waiting", slow }
       end
     elseif has_lab then
       warnings[#warnings + 1] = { "research idle", "no research is queued: the labs are idle" }
@@ -4625,7 +4774,8 @@ end -- The rest of the HUD lives in its own function, whose locals do not count 
 end)()
 
 -- Every tick: steer the walk, watch the mining, count finished crafts, and
--- chart around the body. Every second: note whether research moved.
+-- chart around the body. Every second: note whether research moved, and
+-- every 10 seconds its pace.
 function M.on_tick()
   local s = storage.agent
   local character = s and s.character
@@ -4646,7 +4796,7 @@ function M.on_tick()
   step_crafts()
   chart_around(character)
   if game.tick % 60 == 0 then
-    watch_research(s, character.force)
+    M.watch_research(s, character)
   end
 end
 

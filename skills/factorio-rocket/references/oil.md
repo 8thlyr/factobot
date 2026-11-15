@@ -554,6 +554,5 @@ Power drop: not tested. A refinery and chemical plant restart by themselves when
 
 - The site in any orientation other than refineries north and belts east (the port tables cover every direction).
 - A real offshore pump feeding the water row, a real coal line on the coal belt, and real consumers at the belts' east ends.
-- Processing units: an AM2 with `processing-unit` takes acid at (0, -2) facing north, or (0, +2) facing south, so a row of south-facing AM2s on the same acid row as the battery plants should work; not built.
 - Backed-up output on the advanced site, a power drop, a third refinery.
 - Whether the 977 water/s through 312 tiles was limited by the pump (rated 1,200/s) or by the pipe.
