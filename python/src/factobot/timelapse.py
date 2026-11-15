@@ -489,6 +489,10 @@ VIDEO_MARGIN = 6.0
 # The most a frame's pixels are enlarged, and the fewest tiles the picture is tall.
 MAX_ZOOM = 2.5
 MIN_TILES = 24.0
+# The most tiles the picture is tall, so machines stay readable however far the
+# factory spreads, and the share of the factory's machines its active core holds.
+MAX_TILES = 100.0
+CORE_SHARE = 0.85
 # Seconds of video the camera's path is smoothed over (a Gaussian's sigma), and
 # how many times it is smoothed and kept inside the frames.
 CAMERA_SIGMA = 2.0
@@ -686,7 +690,19 @@ def camera_targets(
         if factory is None:
             targets.append(_inside(_at(shown.center, max(least, shown.width), aspect), shown))
             continue
-        whole = _fit(_grow(factory, VIDEO_MARGIN), aspect, 0)
+        # The active core: the densest chunks holding most of the factory's
+        # machines, so a few far rows never zoom the picture out of reading.
+        core = _dense_box(
+            (
+                (x, y, 1.0)
+                for x, y in machines
+                if factory.left <= x <= factory.right and factory.top <= y <= factory.bottom
+            ),
+            CORE_SHARE,
+        )
+        whole = _fit(_grow(core or factory, VIDEO_MARGIN), aspect, 0)
+        if whole.width > MAX_TILES * aspect:
+            whole = _at(whole.center, MAX_TILES * aspect, aspect)
         here = _grow(factory, CHUNK_TILES)
         building = (
             _dense_box(
@@ -913,9 +929,11 @@ def caption_times(wanted: Sequence[float], end: float) -> list[tuple[float, floa
     return shown
 
 
-def _clock(seconds: float) -> str:
+def _clock(seconds: float, *, compact: bool = False) -> str:
+    """Hours and minutes with their units, "8h 39m" ("8h39m" when compact), so
+    a time is never read as minutes and seconds."""
     minutes = int(seconds // 60)
-    return f"{minutes // 60}:{minutes % 60:02d}"
+    return f"{minutes // 60}h{'' if compact else ' '}{minutes % 60:02d}m"
 
 
 def _ass_time(seconds: float) -> str:
@@ -934,7 +952,7 @@ def _ass_styles(cut: Cut) -> str:
     caption_margin = cut.height - cut.picture[1] - cut.picture[3] + 30 if cut.vertical else 60
     styles = [
         ("Clock", "JetBrains Mono", 64 if cut.vertical else 68, 1, True, 7, pad),
-        ("Counts", "DejaVu Sans", 46 if cut.vertical else 50, 0, True, 9, pad),
+        ("Counts", "DejaVu Sans", 64 if cut.vertical else 70, 0, True, 9, pad),
         ("Caption", "DejaVu Sans", 84 if cut.vertical else 104, 1, True, 2, caption_margin),
         ("Card", "DejaVu Sans", 52, 1, False, 5, 0),
     ]
@@ -986,14 +1004,14 @@ def overlay_ass(
             f"Dialogue: {layer},{_ass_time(start)},{_ass_time(stop)},{style},,0,0,0,,{text}"
         )
 
-    small = 50 if cut.vertical else 56
+    small = 70 if cut.vertical else 78
     add(0, 0, cut.intro, "Card", f"{{\\fad(0,500)}}{dim}")
     add(
         1,
         0,
         cut.intro,
         "Card",
-        f"{{\\fad(300,500)}}{logo}\\N{{\\fs{72 if cut.vertical else 76}\\c&HFFFFFF&\\b1}}{title}"
+        f"{{\\fad(300,500)}}{logo}\\N{{\\fs{80 if cut.vertical else 88}\\c&HFFFFFF&\\b1}}{title}"
         f"\\N{{\\fs{small}\\b0\\c&HE6E6E6&}}{subline}",
     )
     add(0, end - cut.outro, end, "Card", f"{{\\fad(500,0)}}{dim}")
@@ -1012,14 +1030,16 @@ def overlay_ass(
             cut.intro,
             end - cut.outro,
             "Card",
-            f"{{\\an8\\pos({cut.width // 2},40)\\fs68\\b1}}{title}"
-            f"\\N{{\\fs46\\b0\\c&HE6E6E6&}}{band}",
+            f"{{\\an8\\pos({cut.width // 2},30)\\fs68\\b1}}{title}"
+            f"\\N{{\\fs62\\b0\\c&HE6E6E6&}}{band}",
         )
     # The clock and counts change when the text does, not on every frame.
     shown: list[tuple[float, str, str]] = []
     for record, at in zip(frames, starts, strict=True):
         wall = (_parse_time(record["time"]) - started).total_seconds()
-        clock = f"game {_clock(record['tick'] / TICKS_PER_SECOND)}  real {_clock(wall)}"
+        game = _clock(record["tick"] / TICKS_PER_SECOND, compact=True)
+        sep = " · " if cut.vertical else "\\N"
+        clock = f"game {game}{sep}real {_clock(wall, compact=True)}"
         parts = []
         for key, label in SHOWN_COUNTS:
             count = record["counts"].get(key, 0)
@@ -1028,7 +1048,7 @@ def overlay_ass(
         if not shown or shown[-1][1:] != (clock, counts):
             shown.append((at, clock, counts))
     clock_at = f"{{\\an8\\pos({cut.width // 2},{below + 30})}}" if cut.vertical else ""
-    counts_at = f"{{\\an8\\pos({cut.width // 2},{below + 140})}}" if cut.vertical else ""
+    counts_at = f"{{\\an8\\pos({cut.width // 2},{below + 135})}}" if cut.vertical else ""
     for (at, clock, counts), following in zip(shown, [*shown[1:], None], strict=True):
         stop = following[0] if following else body_end
         add(2, at, stop, "Clock", clock_at + clock)
