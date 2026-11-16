@@ -111,9 +111,11 @@ pub enum Command {
     },
     /// Walk to a position along a planned route, at running speed. One walk
     /// goes at most 500 tiles. The route goes through whole tiles: you can't
-    /// be routed between two buildings standing side by side. When there is
-    /// no route, the error says whether you or the target is closed in and
-    /// what stands in the way. If something solid keeps you from getting
+    /// be routed between two buildings standing side by side. Pressed
+    /// against a cliff, you first step off it to clear ground and the route
+    /// starts there. When there is no route, the error says whether you or
+    /// the target is closed in, or what you are pressed against, and what
+    /// stands in the way. If something solid keeps you from getting
     /// --within of it, the walk ends as near as you get at the end of its
     /// route; 2 seconds without getting nearer the next point of its route
     /// fails it as `stuck`.
