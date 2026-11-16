@@ -183,6 +183,7 @@ script.on_event(defines.events.on_tick, function(event)
   launch_clip.on_tick(event)
 end)
 script.on_event(defines.events.on_script_path_request_finished, agent.on_path)
+script.on_event(defines.events.on_chunk_generated, agent.on_chunk_generated)
 script.on_event(defines.events.on_rocket_launched, milestones.on_rocket_launched)
 script.on_event(defines.events.on_rocket_launch_ordered, launch_clip.on_launch_ordered)
 

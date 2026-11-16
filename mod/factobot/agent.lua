@@ -486,9 +486,30 @@ end
 -- still on the way, "arrived" within `within` of the target or at the end of
 -- the route, or why it stopped.
 local function steer(character, job)
+  local free = job.freeing
+  if free then
+    -- Walking straight off what the body is pressed against (M.free_body),
+    -- as a player would; once it stands clear the route is planned again.
+    if not M.touching(character, 1 / 64) then
+      stop_body(character)
+      job.freeing, job.direction = nil, nil
+      job.requested_tick = game.tick
+      request_route(character, job)
+    elseif game.tick - job.requested_tick > STUCK_TICKS then
+      stop_body(character)
+      return M.wedged_reason(character, 1 / 64)
+    else
+      local direction = direction_towards(character.position, free)
+      if direction ~= job.direction then
+        job.direction = direction
+        character.walking_state = { walking = true, direction = direction }
+      end
+    end
+    return nil
+  end
   local path = job.path
   if not path then
-    if game.tick - job.started_tick > PATH_TIMEOUT_TICKS then
+    if game.tick - (job.requested_tick or job.started_tick) > PATH_TIMEOUT_TICKS then
       return "no path: the pathfinder gave no route in 10 seconds"
     end
     return nil -- waiting for the pathfinder
@@ -502,6 +523,16 @@ local function steer(character, job)
   if distance(position, job.target) <= job.within then
     stop_body(character)
     return "arrived"
+  end
+  -- A route that terrain generated during the walk blocks (cliffs of a
+  -- chunk the pathfinder planned through before it existed) is planned
+  -- again from here.
+  if M.route_blocked(character, job) then
+    stop_body(character)
+    job.path, job.direction = nil, nil
+    job.requested_tick = game.tick
+    request_route(character, job)
+    return nil
   end
 
   local waypoint = path[job.waypoint]
@@ -575,11 +606,13 @@ local DIAGONALS = { { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }
 
 -- What stops the character standing at a point: an entity it collides
 -- with, "water" (any tile it can't walk on), or nil when it fits there.
-local function in_the_way(character, layers, p)
+-- `margin` grows the character's box by that many tiles on every side.
+local function in_the_way(character, layers, p, margin)
   local box = character.prototype.collision_box
+  local grow = margin or 0
   local area = {
-    { p.x + box.left_top.x, p.y + box.left_top.y },
-    { p.x + box.right_bottom.x, p.y + box.right_bottom.y },
+    { p.x + box.left_top.x - grow, p.y + box.left_top.y - grow },
+    { p.x + box.right_bottom.x + grow, p.y + box.right_bottom.y + grow },
   }
   local surface = character.surface
   for _, other in pairs(surface.find_entities_filtered({ area = area, collision_mask = layers })) do
@@ -798,6 +831,12 @@ local function no_path_reason(character, target, line, unfinished)
       )
     end
   end
+  -- After M.free_body, a body still pressed against something is why: the
+  -- pathfinder starts no route from there.
+  local wedged = M.wedged_reason(character, M.PRESSED)
+  if wedged then
+    return wedged
+  end
   if inside and line then
     local reason =
       string.format("no path: the walk beside the line ends in %s", obstacle(inside, target))
@@ -898,6 +937,115 @@ local function enclosed_by(character, entity)
   return nil
 end
 
+-- The pathfinder plans no route from where the character's box touches
+-- anything, whatever the goal (probed on 2.1.24 with seed 1's cliffs: from
+-- a body touching a cliff's slanted face, a start 1/256 tile east routes).
+-- Walking into a slanted cliff face leaves the body touching it, while
+-- walking into a building's straight side leaves a 1/256 tile gap, which
+-- the pathfinder accepts.
+-- A box grown by this much overlaps what the body is pressed against.
+M.PRESSED = 0.0035
+
+-- What the body's box, grown by `margin` tiles, overlaps, or nil.
+function M.touching(character, margin)
+  return in_the_way(character, walk_layers(character), character.position, margin)
+end
+
+-- The answer for a body pressed against something that it can't walk
+-- clear of, or nil when it isn't pressed against anything.
+function M.wedged_reason(character, margin)
+  local what = M.touching(character, margin)
+  if not what then
+    return nil
+  end
+  local reason = string.format(
+    "no path: you are pressed against the %s and can't walk clear of it, so no route can start where you stand",
+    obstacle(what, character.position)
+  )
+  if mineable(character, what) then
+    reason = reason .. "; mine it"
+  end
+  return reason
+end
+
+-- A route that finds nothing from a body pressed against something: walk
+-- the body straight toward the nearest clear ground, as a player would, and
+-- plan again once it stands clear (`steer`). Returns whether that walk
+-- started; it is tried once per route.
+function M.free_body(character, job)
+  if job.freed or not M.touching(character, M.PRESSED) then
+    return false
+  end
+  job.freed = true
+  local layers = walk_layers(character)
+  local here = character.position
+  for ring = 1, 8 do
+    for k = 0, 15 do
+      local angle = k * math.pi / 8
+      local spot =
+        { x = here.x + ring / 4 * math.cos(angle), y = here.y + ring / 4 * math.sin(angle) }
+      if not in_the_way(character, layers, spot, 0.2) then
+        job.freeing, job.path, job.direction = spot, nil, nil
+        job.requested_tick = game.tick
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- The pathfinder plans through chunks not generated yet as open ground, and
+-- their cliffs, rocks and trees appear when the body comes near
+-- (`chart_around`), on a route already planned. Note where terrain appeared
+-- while a route is followed; a cliff reaches a few tiles past its chunk.
+function M.on_chunk_generated(event)
+  local s = storage.agent
+  local job = s and s.body_job and s.jobs[s.body_job]
+  if not (job and job.state == "running" and job.path) then
+    return
+  end
+  local character = s.character
+  if not (character and character.valid and event.surface == character.surface) then
+    return
+  end
+  local a, seen = event.area, job.new_terrain
+  job.new_terrain = {
+    left = math.min(a.left_top.x - 4, seen and seen.left or math.huge),
+    top = math.min(a.left_top.y - 4, seen and seen.top or math.huge),
+    right = math.max(a.right_bottom.x + 4, seen and seen.right or -math.huge),
+    bottom = math.max(a.right_bottom.y + 4, seen and seen.bottom or -math.huge),
+  }
+end
+
+-- Whether terrain that appeared since the last look stands on what is left
+-- of the job's route.
+function M.route_blocked(character, job)
+  local area = job.new_terrain
+  if not area then
+    return false
+  end
+  job.new_terrain = nil
+  local layers = walk_layers(character)
+  local path = job.path
+  local before = path[job.waypoint - 1] or character.position
+  for i = job.waypoint, #path do
+    local p = path[i]
+    for _, q in ipairs({ { x = (before.x + p.x) / 2, y = (before.y + p.y) / 2 }, p }) do
+      if
+        q.x >= area.left
+        and q.x <= area.right
+        and q.y >= area.top
+        and q.y <= area.bottom
+        and in_the_way(character, layers, q)
+      then
+        return true
+      end
+    end
+    before = p
+  end
+  return false
+end
+
 function M.on_path(event)
   local s = state()
   local job
@@ -920,6 +1068,9 @@ function M.on_path(event)
     return
   end
   if not event.path then
+    if M.free_body(character, job) then
+      return
+    end
     local line = job.kind == "place_line"
     local reason = no_path_reason(character, job.target, line, line and job.next_index <= job.tiles)
     if job.kind == "place_line" then
@@ -937,6 +1088,7 @@ function M.on_path(event)
   job.waypoint = 1
   job.closest = nil
   job.progress_tick = game.tick
+  job.new_terrain, job.freed = nil, nil
 end
 
 -- Mining ---------------------------------------------------------------------
